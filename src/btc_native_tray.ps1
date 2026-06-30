@@ -220,14 +220,14 @@ try {
     Add-Type -AssemblyName System.Drawing
     [System.Windows.Forms.Application]::EnableVisualStyles()
     Ensure-SnapshotFile
-    Write-AppLog '程序启动：v1.1.3 性能优化 + 单位显示'
+    Write-AppLog '程序启动：v1.1.4 数据采集版 + 四位小数显示'
 
     $cfg = Load-Config
     $priceSec = [int](Get-Cfg $cfg 'PRICE_REFRESH_SECONDS' '10')
     if ($priceSec -lt 5) { $priceSec = 5 }
 
     $form = New-Object System.Windows.Forms.Form
-    $form.Text = 'BTC实时通信系统 v1.1.3 优化版'
+    $form.Text = 'BTC实时通信系统 v1.1.4 数据采集版'
     $form.StartPosition = 'CenterScreen'
     $form.MinimumSize = New-Object System.Drawing.Size(980, 650)
     $form.Size = New-Object System.Drawing.Size(1080, 720)
@@ -346,8 +346,8 @@ try {
         } else {
             try {
                 $n = [double]$value
-                if ($n -gt 0) { return ('多 ' + (Format-Num $n 6) + ' BTC') }
-                if ($n -lt 0) { return ('空 ' + (Format-Num ([math]::Abs($n)) 6) + ' BTC') }
+                if ($n -gt 0) { return ('多 ' + (Format-Num $n 4) + ' BTC') }
+                if ($n -lt 0) { return ('空 ' + (Format-Num ([math]::Abs($n)) 4) + ' BTC') }
                 return '无 0 BTC'
             } catch { return $value }
         }
@@ -358,17 +358,17 @@ try {
             $grid.Rows.Clear()
             foreach ($s in $snaps) {
                 if ($s.exchange -like 'OKX*') {
-                    $equityText = Add-Unit $s.equity 'BTC' 8
-                    $availText = Add-Unit $s.available 'BTC' 8
+                    $equityText = Add-Unit $s.equity 'BTC' 4
+                    $availText = Add-Unit $s.available 'BTC' 4
                     $posText = Format-PositionText $s.exchange $s.position
-                    $upnlText = Add-Unit $s.upnl 'BTC' 8
+                    $upnlText = Add-Unit $s.upnl 'BTC' 4
                 } else {
                     $equityText = Add-Unit $s.equity 'USDT' 4
                     $availText = Add-Unit $s.available 'USDT' 4
                     $posText = Format-PositionText $s.exchange $s.position
                     $upnlText = Add-Unit $s.upnl 'USDT' 4
                 }
-                $grid.Rows.Add($s.exchange,$s.symbol,(Format-Num $s.price 2),$s.funding,$equityText,$availText,$posText,(Format-Num $s.entry 2),(Format-Num $s.mark 2),$upnlText,(Format-Num $s.liq 2),$s.open_orders,$s.status) | Out-Null
+                $grid.Rows.Add($s.exchange,$s.symbol,(Format-Num $s.price 4),$s.funding,$equityText,$availText,$posText,(Format-Num $s.entry 4),(Format-Num $s.mark 4),$upnlText,(Format-Num $s.liq 4),$s.open_orders,$s.status) | Out-Null
             }
         } finally {
             $grid.ResumeLayout()
@@ -423,9 +423,9 @@ try {
     $timer.Interval = $priceSec * 1000
     $timer.add_Tick({ Refresh-All })
     $timer.Start()
-    $notify.ShowBalloonTip(1200, 'BTC实时通信系统', 'v1.1.3 优化版已启动', [System.Windows.Forms.ToolTipIcon]::Info)
+    $notify.ShowBalloonTip(1200, 'BTC实时通信系统', 'v1.1.4 数据采集版已启动', [System.Windows.Forms.ToolTipIcon]::Info)
     Refresh-All
-    Write-AppLog 'NotifyIcon Visible=True，进入消息循环 v1.1.3'
+    Write-AppLog 'NotifyIcon Visible=True，进入消息循环 v1.1.4'
     [System.Windows.Forms.Application]::Run($form)
 }
 catch { Write-AppLog ('程序崩溃：' + $_.Exception.ToString()) }
