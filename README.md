@@ -76,7 +76,7 @@ config.env
 code 50110: 当前出口 IP 不在 OKX API Key 白名单
 ```
 
-解决：在 OKX API 管理页面，把程序所在电脑的公网 IP 加入该 API Key 的白名单，或创建一个只读且允许当前 IP 的 API Key。
+解决：如果这台电脑公网 IP 不固定，不要把当前 IP 写死到白名单；可以在 OKX API 管理页面取消该 API Key 的 IP 白名单限制，或重新创建一个**只读权限**且不绑定固定 IP 的 API Key。务必只开启 Read/读取权限，不要开启 Trade/交易 或 Withdraw/提现。
 
 ## 源码
 
