@@ -189,9 +189,14 @@ function Get-OKXSnapshot([hashtable]$cfg) {
             if ($detail) { $snap.equity = [string]$detail.eq; $snap.available = [string]$detail.availBal }
         }
         $positions = OKX-PrivateGet ("/api/v5/account/positions?instType=SWAP&instId=$inst") $cfg
-        $pos = @($positions.data)[0]
+        $posRows = @($positions.data)
+        $pos = @($posRows | Where-Object { try { [double]$_.pos -ne 0 } catch { $false } } | Select-Object -First 1)[0]
+        if (-not $pos -and $posRows.Count -gt 0) { $pos = $posRows[0] }
         if ($pos) {
-            $snap.position = [string]$pos.pos
+            $side = [string]$pos.posSide
+            $amount = [string]$pos.pos
+            if ($side -and $side -ne 'net') { $snap.position = ($side + ' ' + $amount) }
+            else { $snap.position = $amount }
             $snap.entry = [string]$pos.avgPx
             $snap.mark = [string]$pos.markPx
             $snap.upnl = [string]$pos.upl
