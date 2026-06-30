@@ -52,7 +52,7 @@ public sealed class Health
 
 public sealed class Collector
 {
-    public const string SchemaVersion = "2.1.0";
+    public const string SchemaVersion = "2.2.0";
     public readonly string BaseDir;
     public readonly string DataDir;
     public readonly string LogDir;
@@ -78,6 +78,8 @@ public sealed class Collector
         _http.DefaultRequestHeaders.UserAgent.ParseAdd("BTC-Realtime-Monitor/2.0");
     }
 
+    public string ConfigPath => _configPath;
+
     public Dictionary<string,string> LoadConfig()
     {
         var d = new Dictionary<string,string>(StringComparer.OrdinalIgnoreCase);
@@ -91,11 +93,28 @@ public sealed class Collector
         }
         return d;
     }
+    public void SaveConfig(Dictionary<string,string> cfg)
+    {
+        var order = new[] { "BINANCE_ENABLED", "BINANCE_API_KEY", "BINANCE_API_SECRET", "BINANCE_SYMBOL", "OKX_ENABLED", "OKX_API_KEY", "OKX_API_SECRET", "OKX_API_PASSPHRASE", "OKX_INST_ID", "PRICE_REFRESH_SECONDS", "ACCOUNT_REFRESH_SECONDS", "FUNDING_REFRESH_SECONDS", "RETENTION_DAYS" };
+        var sb = new StringBuilder();
+        sb.AppendLine("# BTC实时通信系统配置");
+        sb.AppendLine("# API Key 只需要读取权限，不要开启交易/提现");
+        foreach (var k in order)
+        {
+            if (k is "OKX_ENABLED") sb.AppendLine();
+            if (k is "PRICE_REFRESH_SECONDS") { sb.AppendLine(); sb.AppendLine("# 刷新频率：WebSocket实时更新内存；这里控制界面/落库/REST轮询频率"); }
+            if (k is "RETENTION_DAYS") { sb.AppendLine(); sb.AppendLine("# 自动清理历史数据，范围7-30天"); }
+            sb.AppendLine($"{k}={cfg.GetValueOrDefault(k, "")}");
+        }
+        File.WriteAllText(_configPath, sb.ToString(), Encoding.UTF8);
+    }
+
     static string Cfg(Dictionary<string,string> cfg, string k, string def="") => cfg.TryGetValue(k, out var v) && !string.IsNullOrWhiteSpace(v) ? v : def;
     static int CfgInt(Dictionary<string,string> cfg, string k, int def, int min) => Math.Max(min, int.TryParse(Cfg(cfg,k), out var v) ? v : def);
 
     public void Start()
     {
+        CleanupWorkspaceTrash();
         InitDb();
         EnsureInitialState();
         _cts = new CancellationTokenSource();
@@ -106,7 +125,7 @@ public sealed class Collector
         _ = Task.Run(() => FundingLoop(_cts.Token));
         _ = Task.Run(() => CleanupLoop(_cts.Token));
         Publish("start");
-        Log("C# v2.1 启动：WebSocket价格 + REST账户 + SQLite + 自动清理");
+        Log("C# v2.2 启动：WebSocket价格 + REST账户 + SQLite + 自动清理");
     }
 
     public void Stop() => _cts?.Cancel();
@@ -480,6 +499,21 @@ CREATE TABLE IF NOT EXISTS heartbeat(
         }
     }
 
+    void CleanupWorkspaceTrash()
+    {
+        try
+        {
+            foreach (var pat in new[] { "publish*", "package*", "tmp_sqlite", "tools" })
+                foreach (var d in Directory.GetDirectories(BaseDir, pat)) Directory.Delete(d, true);
+            foreach (var pat in new[] { "BTC-Realtime-Monitor-v*.exe", "BTC-Realtime-Monitor-v*.zip", "*.pdb" })
+                foreach (var f in Directory.GetFiles(BaseDir, pat)) File.Delete(f);
+            var csharp = Path.Combine(BaseDir, "csharp", "BtcCollector");
+            foreach (var d in new[] { Path.Combine(csharp, "bin"), Path.Combine(csharp, "obj") })
+                if (Directory.Exists(d)) Directory.Delete(d, true);
+        }
+        catch (Exception ex) { Log("清理临时文件失败：" + ex.Message); }
+    }
+
     async Task CleanupLoop(CancellationToken ct)
     {
         while(!ct.IsCancellationRequested)
@@ -490,7 +524,7 @@ CREATE TABLE IF NOT EXISTS heartbeat(
     }
     public void CleanupOldData()
     {
-        var cfg=LoadConfig(); var days=CfgInt(cfg,"RETENTION_DAYS",30,1); var cutoff=DateTime.Now.Date.AddDays(-days);
+        var cfg=LoadConfig(); var days=Math.Clamp(CfgInt(cfg,"RETENTION_DAYS",30,7),7,30); var cutoff=DateTime.Now.Date.AddDays(-days);
         foreach(var f in Directory.GetFiles(DataDir,"exchange_snapshots_*.csv"))
         {
             var name=Path.GetFileNameWithoutExtension(f).Replace("exchange_snapshots_","");
@@ -510,27 +544,31 @@ public sealed class MainForm : Form
     readonly Label _status = new();
     readonly NotifyIcon _notify = new();
     readonly CheckBox _autoStart = new();
+    IReadOnlyList<Snapshot> _lastSnaps = Array.Empty<Snapshot>();
+    Icon? _statusIcon;
     readonly bool _startMinimized;
     bool _exit;
 
     public MainForm(string[] args)
     {
         _startMinimized = args.Any(a => a.Equals("--minimized", StringComparison.OrdinalIgnoreCase) || a.Equals("/minimized", StringComparison.OrdinalIgnoreCase));
-        Text="BTC实时通信系统 v2.1"; StartPosition=FormStartPosition.CenterScreen; MinimumSize=new Size(1280,680); Size=new Size(Math.Min(Screen.PrimaryScreen!.WorkingArea.Width - 40, 1600), Math.Min(Screen.PrimaryScreen.WorkingArea.Height - 80, 820)); Font=new Font("Microsoft YaHei UI",9);
+        Text="BTC实时通信系统 v2.2"; StartPosition=FormStartPosition.CenterScreen; MinimumSize=new Size(1380,650); Size=new Size(Screen.PrimaryScreen!.WorkingArea.Width - 20, Math.Min(Screen.PrimaryScreen.WorkingArea.Height - 60, 780)); Font=new Font("Microsoft YaHei UI",9);
         var main=new TableLayoutPanel{Dock=DockStyle.Fill,Padding=new Padding(16),ColumnCount=1,RowCount=5};
-        main.RowStyles.Add(new RowStyle(SizeType.AutoSize)); main.RowStyles.Add(new RowStyle(SizeType.AutoSize)); main.RowStyles.Add(new RowStyle(SizeType.Percent,100)); main.RowStyles.Add(new RowStyle(SizeType.Absolute,130)); main.RowStyles.Add(new RowStyle(SizeType.AutoSize)); Controls.Add(main);
+        main.RowStyles.Add(new RowStyle(SizeType.AutoSize)); main.RowStyles.Add(new RowStyle(SizeType.AutoSize)); main.RowStyles.Add(new RowStyle(SizeType.Percent,100)); main.RowStyles.Add(new RowStyle(SizeType.Absolute,110)); main.RowStyles.Add(new RowStyle(SizeType.AutoSize)); Controls.Add(main);
         main.Controls.Add(new Label{Text="BTC数据采集器",AutoSize=true,Font=new Font("Microsoft YaHei UI",14,FontStyle.Bold),Margin=new Padding(0,0,0,8)},0,0);
         _status.Text="状态：启动中"; _status.AutoSize=true; _status.Margin=new Padding(0,0,0,10); main.Controls.Add(_status,0,1);
-        _grid.Dock=DockStyle.Fill; _grid.ReadOnly=true; _grid.AllowUserToAddRows=false; _grid.AllowUserToDeleteRows=false; _grid.RowHeadersVisible=false; _grid.AutoSizeColumnsMode=DataGridViewAutoSizeColumnsMode.AllCells; _grid.AutoSizeRowsMode=DataGridViewAutoSizeRowsMode.AllCells; _grid.ScrollBars=ScrollBars.Both; _grid.DefaultCellStyle.WrapMode=DataGridViewTriState.False; _grid.ColumnHeadersDefaultCellStyle.WrapMode=DataGridViewTriState.False;
-        foreach(var c in new[]{("exchange","交易所"),("symbol","合约"),("price","实时价"),("funding","资金费率"),("equity","权益"),("available","可用"),("position","持仓"),("entry","开仓均价"),("mark","标记价"),("upnl","未实现盈亏"),("liq","强平价"),("orders","挂单"),("status","状态"),("last","最近成功"),("fail","失败数")}) _grid.Columns.Add(c.Item1,c.Item2);
+        _grid.Dock=DockStyle.Fill; _grid.ReadOnly=true; _grid.AllowUserToAddRows=false; _grid.AllowUserToDeleteRows=false; _grid.RowHeadersVisible=false; _grid.AutoSizeColumnsMode=DataGridViewAutoSizeColumnsMode.Fill; _grid.AutoSizeRowsMode=DataGridViewAutoSizeRowsMode.AllCells; _grid.ScrollBars=ScrollBars.Vertical; _grid.DefaultCellStyle.WrapMode=DataGridViewTriState.False; _grid.ColumnHeadersDefaultCellStyle.WrapMode=DataGridViewTriState.False; _grid.SelectionMode=DataGridViewSelectionMode.FullRowSelect;
+        foreach(var c in new[]{("exchange","交易所"),("symbol","合约"),("price","价格"),("funding","资金"),("equity","权益"),("available","可用"),("position","持仓"),("entry","开仓"),("mark","标记"),("upnl","盈亏"),("liq","强平"),("orders","挂单"),("status","状态"),("last","成功"),("fail","失败")}) _grid.Columns.Add(c.Item1,c.Item2);
+        SetColumnWeights();
         main.Controls.Add(_grid,0,2);
         _log.Multiline=true; _log.ReadOnly=true; _log.ScrollBars=ScrollBars.Vertical; _log.Dock=DockStyle.Fill; _log.Font=new Font("Consolas",9); main.Controls.Add(_log,0,3);
         var buttons=new FlowLayoutPanel{Dock=DockStyle.Fill,Height=48,WrapContents=false,Margin=new Padding(0,12,0,0)}; main.Controls.Add(buttons,0,4);
         var refresh=new Button{Text="立即刷新",MinimumSize=new Size(100,34)}; refresh.Click += async (_,_)=> await _collector.RefreshNow(); buttons.Controls.Add(refresh);
         _autoStart.Text="开机自启动"; _autoStart.AutoSize=true; _autoStart.Checked=true; _autoStart.Margin=new Padding(14,8,3,3); _autoStart.CheckedChanged += (_,_)=>SetAutoStart(_autoStart.Checked); buttons.Controls.Add(_autoStart);
+        var config=new Button{Text="配置",MinimumSize=new Size(80,34),Margin=new Padding(12,3,3,3)}; config.Click += (_,_)=>OpenConfig(); buttons.Controls.Add(config);
         var hide=new Button{Text="隐藏到托盘",MinimumSize=new Size(120,34),Margin=new Padding(12,3,3,3)}; hide.Click += (_,_)=>HideToTray(); buttons.Controls.Add(hide);
         var exit=new Button{Text="退出程序",MinimumSize=new Size(100,34),Margin=new Padding(12,3,3,3)}; exit.Click += (_,_)=>ExitApp(); buttons.Controls.Add(exit);
-        _notify.Icon=SystemIcons.Information; _notify.Text="BTC数据采集器"; _notify.Visible=true; var menu=new ContextMenuStrip(); menu.Items.Add("显示窗口",null,(_,_)=>ShowWindow()); menu.Items.Add("隐藏窗口",null,(_,_)=>HideToTray()); menu.Items.Add("退出程序",null,(_,_)=>ExitApp()); _notify.ContextMenuStrip=menu; _notify.DoubleClick += (_,_)=>ShowWindow();
+        _notify.Icon=CreateStatusIcon(false); _notify.Text="BTC数据采集器 启动中"; _notify.Visible=true; var menu=new ContextMenuStrip(); menu.Items.Add("显示窗口",null,(_,_)=>ShowWindow()); menu.Items.Add("隐藏窗口",null,(_,_)=>HideToTray()); menu.Items.Add("退出程序",null,(_,_)=>ExitApp()); _notify.ContextMenuStrip=menu; _notify.DoubleClick += (_,_)=>ShowWindow();
         Resize += (_,_)=> { if(WindowState==FormWindowState.Minimized) HideToTray(); };
         FormClosing += (_,e)=> { if(!_exit && e.CloseReason==CloseReason.UserClosing){ e.Cancel=true; HideToTray(); }};
         _collector.Updated += (snaps,evt)=> BeginInvoke(()=>UpdateGrid(snaps,evt));
@@ -539,18 +577,73 @@ public sealed class MainForm : Form
     }
     void UpdateGrid(IReadOnlyList<Snapshot> snaps,string evt)
     {
+        _lastSnaps = snaps;
         _grid.SuspendLayout(); _grid.Rows.Clear();
-        foreach(var s in snaps) _grid.Rows.Add(s.Exchange,s.Symbol,Fmt(s.Price,1),s.Funding,Money(s.Exchange,s.Equity,"equity"),Money(s.Exchange,s.Available,"available"),Pos(s.Exchange,s.Position),Fmt(s.Entry,1),Fmt(s.Mark,1),Money(s.Exchange,s.Upnl,"upnl"),Fmt(s.Liq,1),s.OpenOrders,s.Status,s.LastSuccess,s.ConsecutiveFailures);
-        _grid.AutoResizeColumns(DataGridViewAutoSizeColumnsMode.AllCells); _grid.ResumeLayout(); _status.Text=$"状态：{evt}｜{DateTime.Now:HH:mm:ss}｜WebSocket｜schema 2.1.0"; _notify.Text=$"BTC采集器 {DateTime.Now:HH:mm:ss}";
+        foreach(var s in snaps)
+        {
+            var idx = _grid.Rows.Add(ShortEx(s.Exchange),s.Symbol,Fmt(s.Price,1),s.Funding,Money(s.Exchange,s.Equity,"equity"),Money(s.Exchange,s.Available,"available"),Pos(s.Exchange,s.Position),Fmt(s.Entry,1),Fmt(s.Mark,1),Money(s.Exchange,s.Upnl,"upnl"),Fmt(s.Liq,1),s.OpenOrders,s.Status,ShortTime(s.LastSuccess),s.ConsecutiveFailures);
+            var row = _grid.Rows[idx];
+            var ok = s.Status == "OK" && s.ConsecutiveFailures == 0;
+            row.Cells[12].Style.BackColor = ok ? Color.FromArgb(210,245,210) : Color.FromArgb(255,210,210);
+            row.Cells[12].Style.ForeColor = ok ? Color.DarkGreen : Color.DarkRed;
+            row.DefaultCellStyle.BackColor = ok ? Color.White : Color.FromArgb(255,245,245);
+        }
+        _grid.ResumeLayout();
+        var allOk = snaps.Count > 0 && snaps.All(x => x.Status == "OK" && x.ConsecutiveFailures == 0);
+        _status.Text=$"状态：{evt}｜{DateTime.Now:HH:mm:ss}｜WebSocket｜schema 2.2.0";
+        UpdateTray(allOk, snaps);
     }
+    void SetColumnWeights()
+    {
+        var weights = new Dictionary<string,float>{{"exchange",85},{"symbol",105},{"price",78},{"funding",70},{"equity",95},{"available",95},{"position",110},{"entry",78},{"mark",78},{"upnl",95},{"liq",78},{"orders",55},{"status",70},{"last",70},{"fail",45}};
+        foreach (DataGridViewColumn col in _grid.Columns)
+        {
+            col.AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill;
+            col.FillWeight = weights.TryGetValue(col.Name, out var w) ? w : 70;
+            col.MinimumWidth = 40;
+        }
+    }
+    static string ShortEx(string ex) => ex.StartsWith("Binance") ? "Binance" : ex.StartsWith("OKX") ? "OKX" : ex;
+    static string ShortTime(string t) => DateTime.TryParse(t, out var dt) ? dt.ToString("HH:mm:ss") : "--";
     static string Money(string ex,string v,string field) => ex.StartsWith("OKX") ? Add(v,"BTC",4) : Add(v,"USDT",1);
     static string Add(string v,string unit,int d){ var f=Fmt(v,d); return f=="--"?"--":$"{f} {unit}"; }
-    static string Fmt(string v,int d)=> decimal.TryParse(v,NumberStyles.Any,CultureInfo.InvariantCulture,out var n)?n.ToString("N"+d):"--";
+    static string Fmt(string v,int d)=> decimal.TryParse(v,NumberStyles.Any,CultureInfo.InvariantCulture,out var n)?n.ToString("F"+d):"--";
     static string Pos(string ex,string v)
     {
         if(string.IsNullOrWhiteSpace(v)||v=="--") return "--";
         if(ex.StartsWith("OKX")) { if(v.StartsWith("short ")) return "空 "+Fmt(v[6..],1)+" 张"; if(v.StartsWith("long ")) return "多 "+Fmt(v[5..],1)+" 张"; return Fmt(v,1)+" 张"; }
-        if(decimal.TryParse(v,NumberStyles.Any,CultureInfo.InvariantCulture,out var n)) return n>0?$"多 {n:N4} BTC":n<0?$"空 {Math.Abs(n):N4} BTC":"无 0 BTC"; return v;
+        if(decimal.TryParse(v,NumberStyles.Any,CultureInfo.InvariantCulture,out var n)) return n>0?$"多 {n:F4} BTC":n<0?$"空 {Math.Abs(n):F4} BTC":"无 0 BTC"; return v;
+    }
+    void UpdateTray(bool ok, IReadOnlyList<Snapshot> snaps)
+    {
+        _statusIcon?.Dispose();
+        _statusIcon = CreateStatusIcon(ok);
+        _notify.Icon = _statusIcon;
+        var okx = snaps.FirstOrDefault(x => x.Exchange.StartsWith("OKX"));
+        var binance = snaps.FirstOrDefault(x => x.Exchange.StartsWith("Binance"));
+        var summary = $"BTC采集 {(ok ? "正常" : "异常")} | B {Fmt(binance?.Price ?? "",1)} | O {Fmt(okx?.Price ?? "",1)}";
+        if (summary.Length > 63) summary = summary[..63];
+        _notify.Text = summary;
+    }
+    static Icon CreateStatusIcon(bool ok)
+    {
+        using var bmp = new Bitmap(16,16);
+        using var g = Graphics.FromImage(bmp);
+        g.Clear(Color.Transparent);
+        using var brush = new SolidBrush(ok ? Color.LimeGreen : Color.Red);
+        using var pen = new Pen(Color.White, 2);
+        g.FillEllipse(brush, 1,1,14,14);
+        g.DrawEllipse(pen, 1,1,14,14);
+        return Icon.FromHandle(bmp.GetHicon());
+    }
+    void OpenConfig()
+    {
+        using var dlg = new ConfigForm(_collector);
+        if (dlg.ShowDialog(this) == DialogResult.OK)
+        {
+            AppendLog("配置已保存，部分连接参数重启程序后完全生效");
+            _ = _collector.RefreshNow();
+        }
     }
     void SyncAutoStartCheckbox()
     {
@@ -575,5 +668,81 @@ public sealed class MainForm : Form
     void AppendLog(string line){ _log.AppendText(line+Environment.NewLine); }
     void HideToTray(){ Hide(); _notify.ShowBalloonTip(800,"BTC数据采集器","程序已隐藏到托盘",ToolTipIcon.Info); }
     void ShowWindow(){ Show(); WindowState=FormWindowState.Normal; Activate(); }
-    void ExitApp(){ _exit=true; _collector.Stop(); _notify.Visible=false; _notify.Dispose(); Close(); Application.Exit(); }
+    void ExitApp(){ _exit=true; _collector.Stop(); _notify.Visible=false; _notify.Dispose(); _statusIcon?.Dispose(); Close(); Application.Exit(); }
 }
+
+public sealed class ConfigForm : Form
+{
+    readonly Collector _collector;
+    readonly Dictionary<string, TextBox> _boxes = new();
+    readonly Dictionary<string, CheckBox> _checks = new();
+    readonly NumericUpDown _price = new(){Minimum=1,Maximum=60,Value=3};
+    readonly NumericUpDown _account = new(){Minimum=5,Maximum=300,Value=10};
+    readonly NumericUpDown _funding = new(){Minimum=30,Maximum=3600,Value=60};
+    readonly NumericUpDown _retention = new(){Minimum=7,Maximum=30,Value=30};
+    public ConfigForm(Collector collector)
+    {
+        _collector = collector;
+        Text = "配置";
+        StartPosition = FormStartPosition.CenterParent;
+        Size = new Size(620, 620);
+        MinimumSize = new Size(620, 620);
+        Font = new Font("Microsoft YaHei UI", 9);
+        var cfg = _collector.LoadConfig();
+        var panel = new TableLayoutPanel{Dock=DockStyle.Fill,Padding=new Padding(14),ColumnCount=2,AutoScroll=true};
+        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute,170));
+        panel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent,100));
+        Controls.Add(panel);
+        int r=0;
+        AddCheck(panel, ref r, "BINANCE_ENABLED", "启用Binance", cfg.GetValueOrDefault("BINANCE_ENABLED","true") != "false");
+        AddBox(panel, ref r, "BINANCE_API_KEY", "Binance API Key", cfg.GetValueOrDefault("BINANCE_API_KEY",""));
+        AddBox(panel, ref r, "BINANCE_API_SECRET", "Binance Secret", cfg.GetValueOrDefault("BINANCE_API_SECRET",""), true);
+        AddBox(panel, ref r, "BINANCE_SYMBOL", "Binance合约", cfg.GetValueOrDefault("BINANCE_SYMBOL","BTCUSDT"));
+        AddCheck(panel, ref r, "OKX_ENABLED", "启用OKX", cfg.GetValueOrDefault("OKX_ENABLED","true") != "false");
+        AddBox(panel, ref r, "OKX_API_KEY", "OKX API Key", cfg.GetValueOrDefault("OKX_API_KEY",""));
+        AddBox(panel, ref r, "OKX_API_SECRET", "OKX Secret", cfg.GetValueOrDefault("OKX_API_SECRET",""), true);
+        AddBox(panel, ref r, "OKX_API_PASSPHRASE", "OKX Passphrase", cfg.GetValueOrDefault("OKX_API_PASSPHRASE",""), true);
+        AddBox(panel, ref r, "OKX_INST_ID", "OKX合约", cfg.GetValueOrDefault("OKX_INST_ID","BTC-USD-SWAP"));
+        AddNum(panel, ref r, "价格刷新/落库秒", _price, cfg.GetValueOrDefault("PRICE_REFRESH_SECONDS","3"));
+        AddNum(panel, ref r, "账户刷新秒", _account, cfg.GetValueOrDefault("ACCOUNT_REFRESH_SECONDS","10"));
+        AddNum(panel, ref r, "资金费率秒", _funding, cfg.GetValueOrDefault("FUNDING_REFRESH_SECONDS","60"));
+        AddNum(panel, ref r, "数据保留天数", _retention, cfg.GetValueOrDefault("RETENTION_DAYS","30"));
+        var buttons = new FlowLayoutPanel{FlowDirection=FlowDirection.RightToLeft,Dock=DockStyle.Fill,Height=45};
+        var ok = new Button{Text="保存",DialogResult=DialogResult.OK,Width=90,Height=32};
+        ok.Click += (_,_) => Save();
+        var cancel = new Button{Text="取消",DialogResult=DialogResult.Cancel,Width=90,Height=32};
+        buttons.Controls.Add(ok); buttons.Controls.Add(cancel);
+        panel.RowStyles.Add(new RowStyle(SizeType.Absolute,50)); panel.Controls.Add(buttons,0,r); panel.SetColumnSpan(buttons,2);
+    }
+    void AddCheck(TableLayoutPanel p, ref int r, string key, string label, bool value)
+    {
+        p.RowStyles.Add(new RowStyle(SizeType.Absolute,34));
+        p.Controls.Add(new Label{Text=label,AutoSize=true,Anchor=AnchorStyles.Left},0,r);
+        var c=new CheckBox{Checked=value,Anchor=AnchorStyles.Left}; _checks[key]=c; p.Controls.Add(c,1,r++);
+    }
+    void AddBox(TableLayoutPanel p, ref int r, string key, string label, string value, bool secret=false)
+    {
+        p.RowStyles.Add(new RowStyle(SizeType.Absolute,36));
+        p.Controls.Add(new Label{Text=label,AutoSize=true,Anchor=AnchorStyles.Left},0,r);
+        var t=new TextBox{Text=value,Dock=DockStyle.Fill,UseSystemPasswordChar=secret}; _boxes[key]=t; p.Controls.Add(t,1,r++);
+    }
+    void AddNum(TableLayoutPanel p, ref int r, string label, NumericUpDown n, string value)
+    {
+        if (decimal.TryParse(value, out var v)) n.Value=Math.Min(n.Maximum, Math.Max(n.Minimum, v));
+        p.RowStyles.Add(new RowStyle(SizeType.Absolute,36));
+        p.Controls.Add(new Label{Text=label,AutoSize=true,Anchor=AnchorStyles.Left},0,r);
+        n.Dock=DockStyle.Left; p.Controls.Add(n,1,r++);
+    }
+    void Save()
+    {
+        var cfg = _collector.LoadConfig();
+        foreach (var kv in _boxes) cfg[kv.Key]=kv.Value.Text.Trim();
+        foreach (var kv in _checks) cfg[kv.Key]=kv.Value.Checked ? "true" : "false";
+        cfg["PRICE_REFRESH_SECONDS"]=_price.Value.ToString(CultureInfo.InvariantCulture);
+        cfg["ACCOUNT_REFRESH_SECONDS"]=_account.Value.ToString(CultureInfo.InvariantCulture);
+        cfg["FUNDING_REFRESH_SECONDS"]=_funding.Value.ToString(CultureInfo.InvariantCulture);
+        cfg["RETENTION_DAYS"]=_retention.Value.ToString(CultureInfo.InvariantCulture);
+        _collector.SaveConfig(cfg);
+    }
+}
+
