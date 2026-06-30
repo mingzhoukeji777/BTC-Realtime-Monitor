@@ -1,32 +1,121 @@
 # BTC实时通信系统
 
-Windows 原生系统托盘 BTC 多交易所实时监控工具。
+Windows 原生 BTC 多交易所数据采集器。
 
-## 当前功能 v1.2.0
+当前主线版本：`v2.0.0 C# 原生版`。
 
-- 中文 GUI 界面
-- Windows 原生系统托盘图标
-- 隐藏到托盘 / 托盘恢复 / 退出程序
+## 定位
+
+这个软件只负责数据采集，不负责策略、风控、交易管理、日报、Excel 管理等复杂功能。
+
+后续管理软件或 Excel 可以读取：
+
+```text
+data\btc_collector.sqlite3
+data\exchange_snapshots_YYYY-MM-DD.csv
+data\heartbeat.json
+```
+
+## 技术方案
+
+- 语言：C# / .NET 8 WinForms
+- GUI：Windows 原生 WinForms
+- 托盘：Windows 原生 NotifyIcon
+- 实时价格：WebSocket
+- 账户/持仓/挂单：REST 低频轮询
+- 数据库：内置 SQLite，不再依赖外部 `sqlite3.exe`
+- 打包：单 EXE，自包含运行时
+
+## 当前功能 v2.0.0
+
 - Binance BTC U本位永续 `BTCUSDT`
-  - 实时价格
-  - 标记价格
+  - WebSocket 实时价格/标记价
   - 资金费率
-  - 账户权益（需要 API Secret）
-  - 当前持仓（需要 API Secret）
-  - 当前挂单（需要 API Secret）
+  - 账户权益、持仓、挂单，只读 REST
 - OKX BTC 币本位永续 `BTC-USD-SWAP`
-  - 实时价格
-  - 资金费率
-  - 账户权益（需要 API Key/Secret/Passphrase）
-  - 当前持仓（需要 API Key/Secret/Passphrase）
-  - 当前挂单（需要 API Key/Secret/Passphrase）
-- 本地 CSV 记录快照
-- 性能优化：拆分刷新频率，价格默认 3 秒、账户/持仓/挂单默认 10 秒、资金费率默认 60 秒
-- 单位显示：实时价格/标记价/强平价等价格字段显示 1 位小数；BTC 金额显示 4 位小数；U本位 USDT 显示 1 位小数；持仓显示多/空和单位
-- 数据存储：SQLite 数据库 `data\btc_collector.sqlite3` + 按日 CSV `data\exchange_snapshots_YYYY-MM-DD.csv`
-- 心跳状态：`data\heartbeat.json` 记录最近成功时间、失败次数、断线/错误状态
-- 数据字段版本：所有快照带 `schema_version=1.2.0`
-- 已打包为 EXE，可直接双击运行，不需要 BAT
+  - WebSocket 实时价格
+  - WebSocket/REST 资金费率
+  - 账户权益、持仓、挂单，只读 REST
+- SQLite 数据库：
+
+```text
+data\btc_collector.sqlite3
+```
+
+- CSV 按日期分文件：
+
+```text
+data\exchange_snapshots_2026-06-30.csv
+```
+
+- 心跳文件：
+
+```text
+data\heartbeat.json
+```
+
+- 自动清理历史数据，默认保留 30 天
+- 所有数据带 `schema_version=2.0.0`
+
+## 显示规则
+
+GUI 显示：
+
+```text
+实时价格 / 标记价 / 强平价：1 位小数
+BTC 金额：4 位小数
+U本位 USDT 金额：1 位小数
+持仓：多/空 + 单位
+```
+
+CSV 和 SQLite 保留接口原始值，方便 Excel 或管理软件做精确计算。
+
+## 配置
+
+复制：
+
+```text
+config.env.example -> config.env
+```
+
+填写本地 API Key。`config.env` 不要上传 GitHub。
+
+示例：
+
+```env
+BINANCE_ENABLED=true
+BINANCE_API_KEY=
+BINANCE_API_SECRET=
+BINANCE_SYMBOL=BTCUSDT
+
+OKX_ENABLED=true
+OKX_API_KEY=
+OKX_API_SECRET=
+OKX_API_PASSPHRASE=
+OKX_INST_ID=BTC-USD-SWAP
+
+PRICE_REFRESH_SECONDS=3
+ACCOUNT_REFRESH_SECONDS=10
+FUNDING_REFRESH_SECONDS=60
+RETENTION_DAYS=30
+```
+
+## API 权限建议
+
+只开：
+
+```text
+Read / 读取
+```
+
+不要开：
+
+```text
+Trade / 交易
+Withdraw / 提现
+```
+
+如果电脑公网 IP 不固定，OKX API Key 可以不绑定 IP 白名单，但务必只开只读权限。
 
 ## 运行方式
 
@@ -36,67 +125,24 @@ Windows 原生系统托盘 BTC 多交易所实时监控工具。
 BTC实时通信系统.exe
 ```
 
-注意：v1.2.0 开始 SQLite 写库需要同目录下的：
+不需要 BAT，不需要 PowerShell，不需要单独安装 .NET。Release 里的 EXE 是自包含单文件。
 
-```text
-tools\sqlite3.exe
+## 数据清理
+
+默认保留最近 30 天：
+
+```env
+RETENTION_DAYS=30
 ```
 
-GitHub Release 请优先下载完整 zip 包，不要只下载单独 EXE。
+清理内容：
 
-运行后会自动创建：
+- SQLite `snapshots` 表中过期快照
+- 过期的按日 CSV 文件
 
-```text
-data\exchange_snapshots.csv
-logs\native_tray.log
-```
+不会清理：
 
-## 配置
+- `config.env`
+- 当天数据
+- heartbeat 当前状态
 
-复制或参考：
-
-```text
-config.env.example
-```
-
-本地创建/编辑：
-
-```text
-config.env
-```
-
-注意：`config.env` 不上传 GitHub。
-
-## 当前验证状态
-
-已验证：
-
-- Binance U本位 BTCUSDT 公开价格正常
-- Binance U本位资金费率正常
-- OKX BTC-USD-SWAP 公开价格正常
-- OKX BTC-USD-SWAP 资金费率正常
-- GUI 正常
-- 系统托盘正常
-
-等待密钥验证/账户侧条件：
-
-- Binance 账户权益、持仓、挂单：当前签名认证已通；如果权益/持仓为空，通常表示该 API Key 对应账户没有 U本位合约资产/持仓，或不是实际交易子账户。
-- OKX 账户权益、持仓、挂单：如返回 `50110`，需要把当前出口 IP 加入 OKX API Key 的 IP 白名单。
-
-## OKX 常见错误
-
-```text
-code 50110: 当前出口 IP 不在 OKX API Key 白名单
-```
-
-解决：如果这台电脑公网 IP 不固定，不要把当前 IP 写死到白名单；可以在 OKX API 管理页面取消该 API Key 的 IP 白名单限制，或重新创建一个**只读权限**且不绑定固定 IP 的 API Key。务必只开启 Read/读取权限，不要开启 Trade/交易 或 Withdraw/提现。
-
-## 源码
-
-```text
-src/btc_native_tray.ps1
-```
-
-## 安全说明
-
-不要把真实 API Key / Secret 上传到 GitHub。
