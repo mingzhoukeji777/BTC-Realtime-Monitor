@@ -2,7 +2,7 @@
 
 Windows 原生系统托盘 BTC 多交易所实时监控工具。
 
-## 当前功能 v1.1.4
+## 当前功能 v1.2.0
 
 - 中文 GUI 界面
 - Windows 原生系统托盘图标
@@ -21,8 +21,11 @@ Windows 原生系统托盘 BTC 多交易所实时监控工具。
   - 当前持仓（需要 API Key/Secret/Passphrase）
   - 当前挂单（需要 API Key/Secret/Passphrase）
 - 本地 CSV 记录快照
-- 性能优化：默认 10 秒刷新，网络请求超时缩短，减少拖动窗口卡顿
-- 单位显示：账户权益/可用/未实现盈亏显示 USDT 或 BTC，持仓显示多/空和单位，GUI 数值统一显示 4 位小数
+- 性能优化：拆分刷新频率，价格默认 3 秒、账户/持仓/挂单默认 10 秒、资金费率默认 60 秒
+- 单位显示：实时价格/标记价/强平价等价格字段显示 1 位小数；BTC 金额显示 4 位小数；U本位 USDT 显示 1 位小数；持仓显示多/空和单位
+- 数据存储：SQLite 数据库 `data\btc_collector.sqlite3` + 按日 CSV `data\exchange_snapshots_YYYY-MM-DD.csv`
+- 心跳状态：`data\heartbeat.json` 记录最近成功时间、失败次数、断线/错误状态
+- 数据字段版本：所有快照带 `schema_version=1.2.0`
 - 已打包为 EXE，可直接双击运行，不需要 BAT
 
 ## 运行方式
@@ -32,6 +35,14 @@ Windows 原生系统托盘 BTC 多交易所实时监控工具。
 ```text
 BTC实时通信系统.exe
 ```
+
+注意：v1.2.0 开始 SQLite 写库需要同目录下的：
+
+```text
+tools\sqlite3.exe
+```
+
+GitHub Release 请优先下载完整 zip 包，不要只下载单独 EXE。
 
 运行后会自动创建：
 

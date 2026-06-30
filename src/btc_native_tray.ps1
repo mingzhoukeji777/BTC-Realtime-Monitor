@@ -20,7 +20,9 @@ $LogDir = Join-Path $BaseDir 'logs'
 $DataDir = Join-Path $BaseDir 'data'
 New-Item -ItemType Directory -Force -Path $LogDir, $DataDir | Out-Null
 $LogFile = Join-Path $LogDir 'native_tray.log'
-$SnapshotCsv = Join-Path $DataDir 'exchange_snapshots.csv'
+$SchemaVersion = '1.2.0'
+$SnapshotDb = Join-Path $DataDir 'btc_collector.sqlite3'
+$SqliteExe = Join-Path (Join-Path $BaseDir 'tools') 'sqlite3.exe'
 $ConfigFile = Join-Path $BaseDir 'config.env'
 
 function Write-AppLog([string]$Msg) {
@@ -135,10 +137,119 @@ function Format-Num($v, [int]$digits=2) {
     } catch { return '--' }
 }
 
-function Ensure-SnapshotFile {
-    if (-not (Test-Path $SnapshotCsv)) {
-        'ts,exchange,symbol,price,funding,equity,available,position,entry,mark,upnl,liq,open_orders,status' | Set-Content -Path $SnapshotCsv -Encoding UTF8
+function Get-SnapshotCsvPath {
+    $day = Get-Date -Format 'yyyy-MM-dd'
+    return (Join-Path $DataDir ("exchange_snapshots_$day.csv"))
+}
+
+function Ensure-SnapshotFile([string]$path) {
+    if (-not (Test-Path $path)) {
+        'schema_version,ts,event_type,exchange,symbol,price,funding,equity,available,position,entry,mark,upnl,liq,open_orders,status,last_success,consecutive_failures' | Set-Content -Path $path -Encoding UTF8
     }
+}
+
+function SqlQuote([string]$s) {
+    if ($null -eq $s) { return "''" }
+    return "'" + ([string]$s).Replace("'", "''") + "'"
+}
+
+function Invoke-Sqlite([string]$sql) {
+    if (-not (Test-Path $SqliteExe)) { return $false }
+    try {
+        $tmp = Join-Path $DataDir ('sqlite_' + [Guid]::NewGuid().ToString('N') + '.sql')
+        Set-Content -Path $tmp -Encoding UTF8 -Value $sql
+        & $SqliteExe $SnapshotDb ".read $tmp" | Out-Null
+        Remove-Item $tmp -Force -ErrorAction SilentlyContinue
+        return $true
+    } catch {
+        Write-AppLog ('sqlite write failed: ' + $_.Exception.Message)
+        return $false
+    }
+}
+
+function Ensure-Database {
+    $sql = @"
+PRAGMA journal_mode=WAL;
+CREATE TABLE IF NOT EXISTS snapshots (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  schema_version TEXT NOT NULL,
+  ts TEXT NOT NULL,
+  event_type TEXT NOT NULL,
+  exchange TEXT NOT NULL,
+  symbol TEXT,
+  price TEXT,
+  funding TEXT,
+  equity TEXT,
+  available TEXT,
+  position TEXT,
+  entry TEXT,
+  mark TEXT,
+  upnl TEXT,
+  liq TEXT,
+  open_orders TEXT,
+  status TEXT,
+  last_success TEXT,
+  consecutive_failures INTEGER DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_snapshots_ts_exchange ON snapshots(ts, exchange);
+CREATE TABLE IF NOT EXISTS heartbeat (
+  exchange TEXT PRIMARY KEY,
+  schema_version TEXT NOT NULL,
+  last_success TEXT,
+  last_error TEXT,
+  consecutive_failures INTEGER DEFAULT 0,
+  updated_at TEXT NOT NULL
+);
+"@
+    Invoke-Sqlite $sql | Out-Null
+}
+
+function Update-Health([string]$exchange, [bool]$ok, [string]$message='') {
+    $now = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+    if (-not $script:health.ContainsKey($exchange)) {
+        $script:health[$exchange] = [ordered]@{ last_success=''; last_error=''; consecutive_failures=0; updated_at=$now }
+    }
+    if ($ok) {
+        $script:health[$exchange]['last_success'] = $now
+        $script:health[$exchange]['last_error'] = ''
+        $script:health[$exchange]['consecutive_failures'] = 0
+    } else {
+        $script:health[$exchange]['last_error'] = $message
+        $script:health[$exchange]['consecutive_failures'] = [int]$script:health[$exchange]['consecutive_failures'] + 1
+    }
+    $script:health[$exchange]['updated_at'] = $now
+}
+
+function Write-Heartbeat {
+    $hbPath = Join-Path $DataDir 'heartbeat.json'
+    $obj = [ordered]@{ schema_version=$SchemaVersion; updated_at=(Get-Date -Format 'yyyy-MM-dd HH:mm:ss'); exchanges=$script:health }
+    ($obj | ConvertTo-Json -Depth 6) | Set-Content -Path $hbPath -Encoding UTF8
+    if (Test-Path $SqliteExe) {
+        $sql = ''
+        foreach ($k in $script:health.Keys) {
+            $h = $script:health[$k]
+            $sql += "INSERT OR REPLACE INTO heartbeat(exchange,schema_version,last_success,last_error,consecutive_failures,updated_at) VALUES (" + (SqlQuote $k) + "," + (SqlQuote $SchemaVersion) + "," + (SqlQuote $h['last_success']) + "," + (SqlQuote $h['last_error']) + "," + ([int]$h['consecutive_failures']) + "," + (SqlQuote $h['updated_at']) + ");`n"
+        }
+        if ($sql) { Invoke-Sqlite $sql | Out-Null }
+    }
+}
+
+function Persist-Snapshots([string]$eventType, [array]$snaps) {
+    $now = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+    $csv = Get-SnapshotCsvPath
+    Ensure-SnapshotFile $csv
+    $sql = ''
+    foreach ($s in $snaps) {
+        $h = $script:health[$s.exchange]
+        $lastSuccess = if ($h) { $h['last_success'] } else { '' }
+        $fails = if ($h) { [int]$h['consecutive_failures'] } else { 0 }
+        $csvLine = '"{0}","{1}","{2}","{3}","{4}","{5}","{6}","{7}","{8}","{9}","{10}","{11}","{12}","{13}","{14}","{15}","{16}","{17}"' -f $SchemaVersion,$now,$eventType,$s.exchange,$s.symbol,$s.price,$s.funding,$s.equity,$s.available,$s.position,$s.entry,$s.mark,$s.upnl,$s.liq,$s.open_orders,($s.status -replace '"',''),$lastSuccess,$fails
+        Add-Content -Path $csv -Encoding UTF8 -Value $csvLine
+        $vals = @($SchemaVersion,$now,$eventType,$s.exchange,$s.symbol,$s.price,$s.funding,$s.equity,$s.available,$s.position,$s.entry,$s.mark,$s.upnl,$s.liq,$s.open_orders,($s.status -replace '"',''),$lastSuccess,[string]$fails)
+        $sql += "INSERT INTO snapshots(schema_version,ts,event_type,exchange,symbol,price,funding,equity,available,position,entry,mark,upnl,liq,open_orders,status,last_success,consecutive_failures) VALUES (" + (($vals | ForEach-Object { SqlQuote $_ }) -join ',') + ");`n"
+    }
+    if ($sql) { Invoke-Sqlite $sql | Out-Null }
+    Write-Heartbeat
 }
 
 function Get-BinanceSnapshot([hashtable]$cfg) {
@@ -219,15 +330,19 @@ try {
     Add-Type -AssemblyName System.Windows.Forms
     Add-Type -AssemblyName System.Drawing
     [System.Windows.Forms.Application]::EnableVisualStyles()
-    Ensure-SnapshotFile
-    Write-AppLog '程序启动：v1.1.4 数据采集版 + 四位小数显示'
+    Ensure-Database
+    Write-AppLog '程序启动：v1.2.0 数据采集版：分频刷新+SQLite+心跳'
 
     $cfg = Load-Config
-    $priceSec = [int](Get-Cfg $cfg 'PRICE_REFRESH_SECONDS' '10')
-    if ($priceSec -lt 5) { $priceSec = 5 }
+    $priceSec = [int](Get-Cfg $cfg 'PRICE_REFRESH_SECONDS' '3')
+    if ($priceSec -lt 1) { $priceSec = 1 }
+    $accountSec = [int](Get-Cfg $cfg 'ACCOUNT_REFRESH_SECONDS' '10')
+    if ($accountSec -lt 5) { $accountSec = 5 }
+    $fundingSec = [int](Get-Cfg $cfg 'FUNDING_REFRESH_SECONDS' '60')
+    if ($fundingSec -lt 30) { $fundingSec = 30 }
 
     $form = New-Object System.Windows.Forms.Form
-    $form.Text = 'BTC实时通信系统 v1.1.4 数据采集版'
+    $form.Text = 'BTC实时通信系统 v1.2.0 数据采集版'
     $form.StartPosition = 'CenterScreen'
     $form.MinimumSize = New-Object System.Drawing.Size(980, 650)
     $form.Size = New-Object System.Drawing.Size(1080, 720)
@@ -327,6 +442,9 @@ try {
     $notify.ContextMenuStrip = $menu
 
     $script:closingForExit = $false
+    $script:health = @{}
+    $script:lastSnaps = @{}
+    $script:lastFundingRefresh = Get-Date '2000-01-01'
     function Add-Unit([string]$value, [string]$unit, [int]$digits=4) {
         $n = Format-Num $value $digits
         if ($n -eq '--') { return '--' }
@@ -335,12 +453,12 @@ try {
     function Format-PositionText([string]$exchange, [string]$value) {
         if ([string]::IsNullOrWhiteSpace($value) -or $value -eq '--') { return '--' }
         if ($exchange -like 'OKX*') {
-            if ($value -like 'short *') { return ('空 ' + $value.Substring(6) + ' 张') }
-            if ($value -like 'long *') { return ('多 ' + $value.Substring(5) + ' 张') }
+            if ($value -like 'short *') { try { return ('空 ' + (Format-Num ([double]$value.Substring(6)) 4) + ' 张') } catch { return ('空 ' + $value.Substring(6) + ' 张') } }
+            if ($value -like 'long *') { try { return ('多 ' + (Format-Num ([double]$value.Substring(5)) 4) + ' 张') } catch { return ('多 ' + $value.Substring(5) + ' 张') } }
             try {
                 $n = [double]$value
-                if ($n -gt 0) { return ('多 ' + $value + ' 张') }
-                if ($n -lt 0) { return ('空 ' + ([math]::Abs($n)).ToString() + ' 张') }
+                if ($n -gt 0) { return ('多 ' + (Format-Num $n 4) + ' 张') }
+                if ($n -lt 0) { return ('空 ' + (Format-Num ([math]::Abs($n)) 4) + ' 张') }
                 return '无 0 张'
             } catch { return ($value + ' 张') }
         } else {
@@ -363,53 +481,121 @@ try {
                     $posText = Format-PositionText $s.exchange $s.position
                     $upnlText = Add-Unit $s.upnl 'BTC' 4
                 } else {
-                    $equityText = Add-Unit $s.equity 'USDT' 4
-                    $availText = Add-Unit $s.available 'USDT' 4
+                    $equityText = Add-Unit $s.equity 'USDT' 1
+                    $availText = Add-Unit $s.available 'USDT' 1
                     $posText = Format-PositionText $s.exchange $s.position
-                    $upnlText = Add-Unit $s.upnl 'USDT' 4
+                    $upnlText = Add-Unit $s.upnl 'USDT' 1
                 }
-                $grid.Rows.Add($s.exchange,$s.symbol,(Format-Num $s.price 4),$s.funding,$equityText,$availText,$posText,(Format-Num $s.entry 4),(Format-Num $s.mark 4),$upnlText,(Format-Num $s.liq 4),$s.open_orders,$s.status) | Out-Null
+                $grid.Rows.Add($s.exchange,$s.symbol,(Format-Num $s.price 1),$s.funding,$equityText,$availText,$posText,(Format-Num $s.entry 1),(Format-Num $s.mark 1),$upnlText,(Format-Num $s.liq 1),$s.open_orders,$s.status) | Out-Null
             }
         } finally {
             $grid.ResumeLayout()
         }
     }
-    function Refresh-All {
-        if ($script:refreshing) { return }
-        $script:refreshing = $true
-        $statusLabel.Text = '状态：刷新中……'
-        [System.Windows.Forms.Application]::DoEvents()
+    function New-Snap([string]$exchange, [string]$symbol) {
+        return [ordered]@{ exchange=$exchange; symbol=$symbol; price='--'; funding='--'; equity='--'; available='--'; position='--'; entry='--'; mark='--'; upnl='--'; liq='--'; open_orders='--'; status='启动中' }
+    }
+    function State-Key([string]$exchange) { return $exchange }
+    function Save-State($snap) {
+        $script:lastSnaps[(State-Key $snap.exchange)] = $snap
+        $ok = ([string]$snap.status -eq 'OK')
+        Update-Health $snap.exchange $ok ([string]$snap.status)
+    }
+    function Get-StateSnaps {
+        $arr = @()
+        foreach ($name in @('Binance U本位','OKX 币本位')) {
+            if ($script:lastSnaps.ContainsKey($name)) { $arr += $script:lastSnaps[$name] }
+        }
+        return $arr
+    }
+    function Apply-State([string]$eventType) {
+        $snaps = @(Get-StateSnaps)
+        if ($snaps.Count -eq 0) { return }
+        Update-Grid $snaps
+        Persist-Snapshots $eventType $snaps
+        $now = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+        $hb = ($snaps | ForEach-Object {
+            $h = $script:health[$_.exchange]
+            if ($h) { $_.exchange + ' 成功=' + $h['last_success'] + ' 失败=' + $h['consecutive_failures'] } else { $_.exchange + ' 等待' }
+        }) -join ' ｜ '
+        $statusLabel.Text = "状态：$eventType 已刷新｜$now｜$hb"
+        $notify.Text = ('BTC采集器 ' + $now)
+        $summary = ($snaps | ForEach-Object { $_.exchange + '=' + (Format-Num $_.price 1) + ' 资金=' + $_.funding }) -join ' | '
+        $logBox.AppendText("`r`n[$now][$eventType] $summary")
+        Write-AppLog ("refresh $eventType $summary")
+    }
+    function Ensure-InitialState {
+        $cfg = Load-Config
+        $binSym = Get-Cfg $cfg 'BINANCE_SYMBOL' 'BTCUSDT'
+        $okxInst = Get-Cfg $cfg 'OKX_INST_ID' 'BTC-USD-SWAP'
+        if (-not $script:lastSnaps.ContainsKey('Binance U本位')) { $script:lastSnaps['Binance U本位'] = New-Snap 'Binance U本位' $binSym }
+        if (-not $script:lastSnaps.ContainsKey('OKX 币本位')) { $script:lastSnaps['OKX 币本位'] = New-Snap 'OKX 币本位' $okxInst }
+    }
+    function Refresh-Price([bool]$includeFunding=$false) {
+        if ($script:refreshingPrice) { return }
+        $script:refreshingPrice = $true
         try {
-            $now = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+            Ensure-InitialState
             $cfg = Load-Config
-            $snaps = @()
-            if ((Get-Cfg $cfg 'BINANCE_ENABLED' 'true') -ne 'false') { $snaps += (Get-BinanceSnapshot $cfg) }
-            if ((Get-Cfg $cfg 'OKX_ENABLED' 'true') -ne 'false') { $snaps += (Get-OKXSnapshot $cfg) }
-            Update-Grid $snaps
-            foreach ($s in $snaps) {
-                $csvLine = '"{0}","{1}","{2}","{3}","{4}","{5}","{6}","{7}","{8}","{9}","{10}","{11}","{12}","{13}"' -f $now,$s.exchange,$s.symbol,$s.price,$s.funding,$s.equity,$s.available,$s.position,$s.entry,$s.mark,$s.upnl,$s.liq,$s.open_orders,($s.status -replace '"','')
-                Add-Content -Path $SnapshotCsv -Encoding UTF8 -Value $csvLine
+            if ((Get-Cfg $cfg 'BINANCE_ENABLED' 'true') -ne 'false') {
+                $symbol = Get-Cfg $cfg 'BINANCE_SYMBOL' 'BTCUSDT'
+                $s = $script:lastSnaps['Binance U本位']
+                $s.symbol = $symbol
+                try {
+                    $ticker = Invoke-JsonGet "https://fapi.binance.com/fapi/v1/ticker/price?symbol=$symbol" $null 3
+                    $s.price = [string]$ticker.price
+                    $premium = Invoke-JsonGet "https://fapi.binance.com/fapi/v1/premiumIndex?symbol=$symbol" $null 3
+                    $s.mark = [string]$premium.markPrice
+                    if ($includeFunding -or $s.funding -eq '--') { $s.funding = [string]([math]::Round(([double]$premium.lastFundingRate * 100), 5)) + '%' }
+                    $s.status = 'OK'
+                } catch { $s.status = '价格接口失败：' + $_.Exception.Message }
+                Save-State $s
             }
-            $statusLabel.Text = "状态：已刷新｜$now｜优化版：默认10秒刷新，网络超时缩短"
-            $notify.Text = ('BTC监控 ' + $now)
-            $summary = ($snaps | ForEach-Object { $_.exchange + '=' + (Format-Num $_.price 2) + ' funding=' + $_.funding }) -join ' | '
-            $logBox.AppendText("`r`n[$now] $summary")
-            Write-AppLog ("refresh $summary")
+            if ((Get-Cfg $cfg 'OKX_ENABLED' 'true') -ne 'false') {
+                $inst = Get-Cfg $cfg 'OKX_INST_ID' 'BTC-USD-SWAP'
+                $s = $script:lastSnaps['OKX 币本位']
+                $s.symbol = $inst
+                try {
+                    $ticker = Invoke-JsonGet "https://www.okx.com/api/v5/market/ticker?instId=$inst" $null 3
+                    if ($ticker.data.Count -gt 0) { $s.price = [string]$ticker.data[0].last }
+                    if ($includeFunding -or $s.funding -eq '--') {
+                        $fund = Invoke-JsonGet "https://www.okx.com/api/v5/public/funding-rate?instId=$inst" $null 3
+                        if ($fund.data.Count -gt 0) { $s.funding = [string]([math]::Round(([double]$fund.data[0].fundingRate * 100), 5)) + '%' }
+                    }
+                    $s.status = 'OK'
+                } catch { $s.status = '价格接口失败：' + $_.Exception.Message }
+                Save-State $s
+            }
+            $evt = if ($includeFunding) { 'funding' } else { 'price' }
+            Apply-State $evt
+        } finally { $script:refreshingPrice = $false }
+    }
+    function Refresh-Account {
+        if ($script:refreshingAccount) { return }
+        $script:refreshingAccount = $true
+        try {
+            $cfg = Load-Config
+            if ((Get-Cfg $cfg 'BINANCE_ENABLED' 'true') -ne 'false') { Save-State (Get-BinanceSnapshot $cfg) }
+            if ((Get-Cfg $cfg 'OKX_ENABLED' 'true') -ne 'false') { Save-State (Get-OKXSnapshot $cfg) }
+            Apply-State 'account'
         } catch {
             $msg = $_.Exception.Message
-            $statusLabel.Text = '状态：刷新失败｜' + $msg
+            $statusLabel.Text = '状态：账户刷新失败｜' + $msg
             $logBox.AppendText("`r`n[ERROR] " + $msg)
-            Write-AppLog ('refresh error ' + $msg)
-        } finally {
-            $script:refreshing = $false
-        }
+            Write-AppLog ('account refresh error ' + $msg)
+        } finally { $script:refreshingAccount = $false }
     }
-    $script:refreshing = $false
+    function Refresh-All {
+        Refresh-Price $true
+        Refresh-Account
+    }
+    $script:refreshingPrice = $false
+    $script:refreshingAccount = $false
 
 
     $showAction = { $form.Show(); $form.WindowState = [System.Windows.Forms.FormWindowState]::Normal; $form.Activate(); Write-AppLog '显示窗口' }
     $hideAction = { $form.Hide(); $notify.BalloonTipTitle='BTC实时通信系统'; $notify.BalloonTipText='程序已隐藏到系统托盘'; $notify.ShowBalloonTip(1000); Write-AppLog '隐藏到托盘' }
-    $exitAction = { Write-AppLog '用户退出程序'; $script:closingForExit=$true; $timer.Stop(); $notify.Visible=$false; $notify.Dispose(); $form.Close(); [System.Windows.Forms.Application]::Exit() }
+    $exitAction = { Write-AppLog '用户退出程序'; $script:closingForExit=$true; try { $timerPrice.Stop(); $timerAccount.Stop(); $timerFunding.Stop() } catch {}; $notify.Visible=$false; $notify.Dispose(); $form.Close(); [System.Windows.Forms.Application]::Exit() }
 
     $miShow.add_Click($showAction); $miHide.add_Click($hideAction); $miExit.add_Click($exitAction)
     $notify.add_DoubleClick($showAction)
@@ -419,13 +605,23 @@ try {
     $form.add_Resize({ if ($form.WindowState -eq [System.Windows.Forms.FormWindowState]::Minimized) { & $hideAction } })
     $form.add_FormClosing({ if (-not $script:closingForExit -and $_.CloseReason -eq [System.Windows.Forms.CloseReason]::UserClosing) { $_.Cancel=$true; & $hideAction } })
 
-    $timer = New-Object System.Windows.Forms.Timer
-    $timer.Interval = $priceSec * 1000
-    $timer.add_Tick({ Refresh-All })
-    $timer.Start()
-    $notify.ShowBalloonTip(1200, 'BTC实时通信系统', 'v1.1.4 数据采集版已启动', [System.Windows.Forms.ToolTipIcon]::Info)
+    $timerPrice = New-Object System.Windows.Forms.Timer
+    $timerPrice.Interval = $priceSec * 1000
+    $timerPrice.add_Tick({ Refresh-Price $false })
+    $timerPrice.Start()
+
+    $timerAccount = New-Object System.Windows.Forms.Timer
+    $timerAccount.Interval = $accountSec * 1000
+    $timerAccount.add_Tick({ Refresh-Account })
+    $timerAccount.Start()
+
+    $timerFunding = New-Object System.Windows.Forms.Timer
+    $timerFunding.Interval = $fundingSec * 1000
+    $timerFunding.add_Tick({ Refresh-Price $true })
+    $timerFunding.Start()
+    $notify.ShowBalloonTip(1200, 'BTC实时通信系统', 'v1.2.0 数据采集版已启动', [System.Windows.Forms.ToolTipIcon]::Info)
     Refresh-All
-    Write-AppLog 'NotifyIcon Visible=True，进入消息循环 v1.1.4'
+    Write-AppLog 'NotifyIcon Visible=True，进入消息循环 v1.2.0'
     [System.Windows.Forms.Application]::Run($form)
 }
 catch { Write-AppLog ('程序崩溃：' + $_.Exception.ToString()) }
