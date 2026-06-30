@@ -5,18 +5,19 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using Microsoft.Data.Sqlite;
+using Microsoft.Win32;
 
 namespace BtcCollector;
 
 internal static class Program
 {
     [STAThread]
-    static void Main()
+    static void Main(string[] args)
     {
         ApplicationConfiguration.Initialize();
         using var mutex = new Mutex(true, "Global\\BTCRealtimeCollector_XiaoZhu_CSharp_v2", out var created);
         if (!created) return;
-        Application.Run(new MainForm());
+        Application.Run(new MainForm(args));
     }
 }
 
@@ -51,7 +52,7 @@ public sealed class Health
 
 public sealed class Collector
 {
-    public const string SchemaVersion = "2.0.0";
+    public const string SchemaVersion = "2.1.0";
     public readonly string BaseDir;
     public readonly string DataDir;
     public readonly string LogDir;
@@ -105,7 +106,7 @@ public sealed class Collector
         _ = Task.Run(() => FundingLoop(_cts.Token));
         _ = Task.Run(() => CleanupLoop(_cts.Token));
         Publish("start");
-        Log("C# v2.0 启动：WebSocket价格 + REST账户 + SQLite + 自动清理");
+        Log("C# v2.1 启动：WebSocket价格 + REST账户 + SQLite + 自动清理");
     }
 
     public void Stop() => _cts?.Cancel();
@@ -279,6 +280,19 @@ CREATE TABLE IF NOT EXISTS heartbeat(
                 await Task.Delay(3000, ct);
             }
         }
+    }
+
+    public async Task RefreshNow()
+    {
+        try
+        {
+            var cfg = LoadConfig();
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+            await RefreshFundingRest(cfg, cts.Token);
+            await RefreshAccountOnce(cfg, cts.Token);
+            Publish("manual");
+        }
+        catch (Exception ex) { Log("手动刷新失败：" + ex.Message); }
     }
 
     async Task AccountLoop(CancellationToken ct)
@@ -495,21 +509,25 @@ public sealed class MainForm : Form
     readonly TextBox _log = new();
     readonly Label _status = new();
     readonly NotifyIcon _notify = new();
+    readonly CheckBox _autoStart = new();
+    readonly bool _startMinimized;
     bool _exit;
 
-    public MainForm()
+    public MainForm(string[] args)
     {
-        Text="BTC实时通信系统 v2.0 C# 数据采集器"; StartPosition=FormStartPosition.CenterScreen; MinimumSize=new Size(1080,680); Size=new Size(1200,760); Font=new Font("Microsoft YaHei UI",9);
+        _startMinimized = args.Any(a => a.Equals("--minimized", StringComparison.OrdinalIgnoreCase) || a.Equals("/minimized", StringComparison.OrdinalIgnoreCase));
+        Text="BTC实时通信系统 v2.1"; StartPosition=FormStartPosition.CenterScreen; MinimumSize=new Size(1280,680); Size=new Size(Math.Min(Screen.PrimaryScreen!.WorkingArea.Width - 40, 1600), Math.Min(Screen.PrimaryScreen.WorkingArea.Height - 80, 820)); Font=new Font("Microsoft YaHei UI",9);
         var main=new TableLayoutPanel{Dock=DockStyle.Fill,Padding=new Padding(16),ColumnCount=1,RowCount=5};
         main.RowStyles.Add(new RowStyle(SizeType.AutoSize)); main.RowStyles.Add(new RowStyle(SizeType.AutoSize)); main.RowStyles.Add(new RowStyle(SizeType.Percent,100)); main.RowStyles.Add(new RowStyle(SizeType.Absolute,130)); main.RowStyles.Add(new RowStyle(SizeType.AutoSize)); Controls.Add(main);
-        main.Controls.Add(new Label{Text="BTC数据采集器：C#原生版｜WebSocket实时价格｜SQLite｜自动清理",AutoSize=true,Font=new Font("Microsoft YaHei UI",14,FontStyle.Bold),Margin=new Padding(0,0,0,10)},0,0);
+        main.Controls.Add(new Label{Text="BTC数据采集器",AutoSize=true,Font=new Font("Microsoft YaHei UI",14,FontStyle.Bold),Margin=new Padding(0,0,0,8)},0,0);
         _status.Text="状态：启动中"; _status.AutoSize=true; _status.Margin=new Padding(0,0,0,10); main.Controls.Add(_status,0,1);
-        _grid.Dock=DockStyle.Fill; _grid.ReadOnly=true; _grid.AllowUserToAddRows=false; _grid.AllowUserToDeleteRows=false; _grid.RowHeadersVisible=false; _grid.AutoSizeColumnsMode=DataGridViewAutoSizeColumnsMode.Fill;
+        _grid.Dock=DockStyle.Fill; _grid.ReadOnly=true; _grid.AllowUserToAddRows=false; _grid.AllowUserToDeleteRows=false; _grid.RowHeadersVisible=false; _grid.AutoSizeColumnsMode=DataGridViewAutoSizeColumnsMode.AllCells; _grid.AutoSizeRowsMode=DataGridViewAutoSizeRowsMode.AllCells; _grid.ScrollBars=ScrollBars.Both; _grid.DefaultCellStyle.WrapMode=DataGridViewTriState.False; _grid.ColumnHeadersDefaultCellStyle.WrapMode=DataGridViewTriState.False;
         foreach(var c in new[]{("exchange","交易所"),("symbol","合约"),("price","实时价"),("funding","资金费率"),("equity","权益"),("available","可用"),("position","持仓"),("entry","开仓均价"),("mark","标记价"),("upnl","未实现盈亏"),("liq","强平价"),("orders","挂单"),("status","状态"),("last","最近成功"),("fail","失败数")}) _grid.Columns.Add(c.Item1,c.Item2);
         main.Controls.Add(_grid,0,2);
         _log.Multiline=true; _log.ReadOnly=true; _log.ScrollBars=ScrollBars.Vertical; _log.Dock=DockStyle.Fill; _log.Font=new Font("Consolas",9); main.Controls.Add(_log,0,3);
         var buttons=new FlowLayoutPanel{Dock=DockStyle.Fill,Height=48,WrapContents=false,Margin=new Padding(0,12,0,0)}; main.Controls.Add(buttons,0,4);
-        var refresh=new Button{Text="立即刷新账户",MinimumSize=new Size(120,34)}; refresh.Click += async (_,_)=> await Task.Run(()=>_collector.CleanupOldData()); buttons.Controls.Add(refresh);
+        var refresh=new Button{Text="立即刷新",MinimumSize=new Size(100,34)}; refresh.Click += async (_,_)=> await _collector.RefreshNow(); buttons.Controls.Add(refresh);
+        _autoStart.Text="开机自启动"; _autoStart.AutoSize=true; _autoStart.Checked=true; _autoStart.Margin=new Padding(14,8,3,3); _autoStart.CheckedChanged += (_,_)=>SetAutoStart(_autoStart.Checked); buttons.Controls.Add(_autoStart);
         var hide=new Button{Text="隐藏到托盘",MinimumSize=new Size(120,34),Margin=new Padding(12,3,3,3)}; hide.Click += (_,_)=>HideToTray(); buttons.Controls.Add(hide);
         var exit=new Button{Text="退出程序",MinimumSize=new Size(100,34),Margin=new Padding(12,3,3,3)}; exit.Click += (_,_)=>ExitApp(); buttons.Controls.Add(exit);
         _notify.Icon=SystemIcons.Information; _notify.Text="BTC数据采集器"; _notify.Visible=true; var menu=new ContextMenuStrip(); menu.Items.Add("显示窗口",null,(_,_)=>ShowWindow()); menu.Items.Add("隐藏窗口",null,(_,_)=>HideToTray()); menu.Items.Add("退出程序",null,(_,_)=>ExitApp()); _notify.ContextMenuStrip=menu; _notify.DoubleClick += (_,_)=>ShowWindow();
@@ -517,13 +535,13 @@ public sealed class MainForm : Form
         FormClosing += (_,e)=> { if(!_exit && e.CloseReason==CloseReason.UserClosing){ e.Cancel=true; HideToTray(); }};
         _collector.Updated += (snaps,evt)=> BeginInvoke(()=>UpdateGrid(snaps,evt));
         _collector.LogLine += line => BeginInvoke(()=>AppendLog(line));
-        Shown += (_,_)=>_collector.Start();
+        Shown += (_,_)=> { SyncAutoStartCheckbox(); SetAutoStart(_autoStart.Checked); _collector.Start(); if (_startMinimized) BeginInvoke(HideToTray); };
     }
     void UpdateGrid(IReadOnlyList<Snapshot> snaps,string evt)
     {
         _grid.SuspendLayout(); _grid.Rows.Clear();
         foreach(var s in snaps) _grid.Rows.Add(s.Exchange,s.Symbol,Fmt(s.Price,1),s.Funding,Money(s.Exchange,s.Equity,"equity"),Money(s.Exchange,s.Available,"available"),Pos(s.Exchange,s.Position),Fmt(s.Entry,1),Fmt(s.Mark,1),Money(s.Exchange,s.Upnl,"upnl"),Fmt(s.Liq,1),s.OpenOrders,s.Status,s.LastSuccess,s.ConsecutiveFailures);
-        _grid.ResumeLayout(); _status.Text=$"状态：{evt}｜{DateTime.Now:HH:mm:ss}｜WebSocket实时价｜schema 2.0.0"; _notify.Text=$"BTC采集器 {DateTime.Now:HH:mm:ss}";
+        _grid.AutoResizeColumns(DataGridViewAutoSizeColumnsMode.AllCells); _grid.ResumeLayout(); _status.Text=$"状态：{evt}｜{DateTime.Now:HH:mm:ss}｜WebSocket｜schema 2.1.0"; _notify.Text=$"BTC采集器 {DateTime.Now:HH:mm:ss}";
     }
     static string Money(string ex,string v,string field) => ex.StartsWith("OKX") ? Add(v,"BTC",4) : Add(v,"USDT",1);
     static string Add(string v,string unit,int d){ var f=Fmt(v,d); return f=="--"?"--":$"{f} {unit}"; }
@@ -531,8 +549,28 @@ public sealed class MainForm : Form
     static string Pos(string ex,string v)
     {
         if(string.IsNullOrWhiteSpace(v)||v=="--") return "--";
-        if(ex.StartsWith("OKX")) { if(v.StartsWith("short ")) return "空 "+Fmt(v[6..],4)+" 张"; if(v.StartsWith("long ")) return "多 "+Fmt(v[5..],4)+" 张"; return v+" 张"; }
+        if(ex.StartsWith("OKX")) { if(v.StartsWith("short ")) return "空 "+Fmt(v[6..],1)+" 张"; if(v.StartsWith("long ")) return "多 "+Fmt(v[5..],1)+" 张"; return Fmt(v,1)+" 张"; }
         if(decimal.TryParse(v,NumberStyles.Any,CultureInfo.InvariantCulture,out var n)) return n>0?$"多 {n:N4} BTC":n<0?$"空 {Math.Abs(n):N4} BTC":"无 0 BTC"; return v;
+    }
+    void SyncAutoStartCheckbox()
+    {
+        try
+        {
+            using var key = Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Run", false);
+            var v = key?.GetValue("BTC实时通信系统") as string;
+            _autoStart.Checked = string.IsNullOrWhiteSpace(v) ? true : v.Contains(Application.ExecutablePath, StringComparison.OrdinalIgnoreCase);
+        }
+        catch { _autoStart.Checked = true; }
+    }
+    void SetAutoStart(bool enabled)
+    {
+        try
+        {
+            using var key = Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Run", true) ?? Registry.CurrentUser.CreateSubKey(@"Software\Microsoft\Windows\CurrentVersion\Run");
+            if (enabled) key.SetValue("BTC实时通信系统", $"\"{Application.ExecutablePath}\" --minimized");
+            else key.DeleteValue("BTC实时通信系统", false);
+        }
+        catch (Exception ex) { AppendLog("设置开机自启动失败：" + ex.Message); }
     }
     void AppendLog(string line){ _log.AppendText(line+Environment.NewLine); }
     void HideToTray(){ Hide(); _notify.ShowBalloonTip(800,"BTC数据采集器","程序已隐藏到托盘",ToolTipIcon.Info); }

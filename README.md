@@ -2,7 +2,7 @@
 
 Windows 原生 BTC 多交易所数据采集器。
 
-当前主线版本：`v2.0.0 C# 原生版`。
+当前主线版本：`v2.1.0 C# / .NET 8 WinForms`。
 
 ## 定位
 
@@ -23,11 +23,16 @@ data\heartbeat.json
 - 托盘：Windows 原生 NotifyIcon
 - 实时价格：WebSocket
 - 账户/持仓/挂单：REST 低频轮询
-- 数据库：内置 SQLite，不再依赖外部 `sqlite3.exe`
-- 打包：单 EXE，自包含运行时
+- 数据库：内置 SQLite
+- 打包：框架依赖小体积单 EXE，不再内置 .NET 运行时
 
-## 当前功能 v2.0.0
+## 当前功能 v2.1.0
 
+- 去掉标题栏和主标题里的技术说明文字，界面更简洁
+- 表格按内容自动适应列宽，窗口启动时尽量适配屏幕工作区
+- OKX 币本位张数显示 1 位小数
+- 开机自启动复选框，默认勾选
+- 开机自启动时自动最小化到托盘
 - Binance BTC U本位永续 `BTCUSDT`
   - WebSocket 实时价格/标记价
   - 资金费率
@@ -55,7 +60,25 @@ data\heartbeat.json
 ```
 
 - 自动清理历史数据，默认保留 30 天
-- 所有数据带 `schema_version=2.0.0`
+- 所有数据带 `schema_version=2.1.0`
+
+## 运行环境
+
+v2.1.0 开始，为了减小体积，EXE 不再内置 .NET。
+
+这台电脑已经安装：
+
+```text
+.NET 8 Desktop Runtime / SDK
+```
+
+所以可以直接双击运行。
+
+如果换到另一台没有 .NET 8 的电脑，需要安装：
+
+```text
+Microsoft .NET 8 Desktop Runtime x64
+```
 
 ## 显示规则
 
@@ -65,6 +88,7 @@ GUI 显示：
 实时价格 / 标记价 / 强平价：1 位小数
 BTC 金额：4 位小数
 U本位 USDT 金额：1 位小数
+OKX 张数：1 位小数
 持仓：多/空 + 单位
 ```
 
@@ -125,7 +149,7 @@ Withdraw / 提现
 BTC实时通信系统.exe
 ```
 
-不需要 BAT，不需要 PowerShell，不需要单独安装 .NET。Release 里的 EXE 是自包含单文件。
+开机自启动由界面底部复选框控制，默认勾选。自启动时会自动最小化到托盘。
 
 ## 数据清理
 
@@ -145,4 +169,3 @@ RETENTION_DAYS=30
 - `config.env`
 - 当天数据
 - heartbeat 当前状态
-
