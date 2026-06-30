@@ -53,7 +53,7 @@ public sealed class Health
 
 public sealed class Collector
 {
-    public const string SchemaVersion = "2.3.0";
+    public const string SchemaVersion = "2.4.0";
     public readonly string BaseDir;
     public string OutputDir
     {
@@ -139,7 +139,7 @@ public sealed class Collector
         _ = Task.Run(() => FundingLoop(_cts.Token));
         _ = Task.Run(() => CleanupLoop(_cts.Token));
         Publish("start");
-        Log("C# v2.3 启动：WebSocket价格 + REST账户 + SQLite + 自动清理");
+        Log("C# v2.4 启动：WebSocket价格 + REST账户 + SQLite + 自动清理");
     }
 
     public void Stop() => _cts?.Cancel();
@@ -151,7 +151,7 @@ public sealed class Collector
         _snaps["OKX 币本位"] = new Snapshot { Exchange="OKX 币本位", Symbol=Cfg(cfg,"OKX_INST_ID","BTC-USD-SWAP") };
     }
 
-    void InitDb()
+    public void InitDb()
     {
         EnsureDirs();
         using var cn = new SqliteConnection($"Data Source={DbPath}");
@@ -508,6 +508,7 @@ CREATE TABLE IF NOT EXISTS heartbeat(
         lock (_persistLock)
         {
         EnsureDirs();
+        InitDb();
         var ts=Now(); var csv=Path.Combine(DataDir,$"exchange_snapshots_{DateTime.Now:yyyy-MM-dd}.csv");
         if (!File.Exists(csv)) File.WriteAllText(csv,"schema_version,ts,event_type,exchange,symbol,price,funding,equity,available,position,entry,mark,upnl,liq,open_orders,status,last_success,consecutive_failures\n",Encoding.UTF8);
         var sb=new StringBuilder();
@@ -531,7 +532,7 @@ CREATE TABLE IF NOT EXISTS heartbeat(
 
     void WriteLatestSnapshot(string eventType, string ts, List<Snapshot> list)
     {
-        var obj = new { schema_version = SchemaVersion, ts, event_type = eventType, snapshots = list };
+        var obj = new { schema_version = SchemaVersion, ts, event_type = eventType, updated_at = ts, snapshots = list };
         File.WriteAllText(Path.Combine(DataDir, "latest_snapshot.json"), JsonSerializer.Serialize(obj, new JsonSerializerOptions{WriteIndented=true}), Encoding.UTF8);
     }
 
@@ -595,20 +596,26 @@ public sealed class MainForm : Form
     readonly CheckBox _autoStart = new();
     IReadOnlyList<Snapshot> _lastSnaps = Array.Empty<Snapshot>();
     Icon? _statusIcon;
+    bool _loadingLayout;
+    string UiSettingsPath => Path.Combine(_collector.BaseDir, "ui_settings.json");
     readonly bool _startMinimized;
     bool _exit;
 
     public MainForm(string[] args)
     {
         _startMinimized = args.Any(a => a.Equals("--minimized", StringComparison.OrdinalIgnoreCase) || a.Equals("/minimized", StringComparison.OrdinalIgnoreCase));
-        Text="BTC实时通信系统 v2.3"; StartPosition=FormStartPosition.CenterScreen; MinimumSize=new Size(1180,620); Size=new Size(Math.Min(Screen.PrimaryScreen!.WorkingArea.Width - 120, 1380), Math.Min(Screen.PrimaryScreen.WorkingArea.Height - 120, 680)); Font=new Font("Microsoft YaHei UI",9);
+        Text="BTC实时通信系统 v2.4"; StartPosition=FormStartPosition.CenterScreen; MinimumSize=new Size(1180,660); Size=new Size(1320,720); Font=new Font("Microsoft YaHei UI",9);
         var main=new TableLayoutPanel{Dock=DockStyle.Fill,Padding=new Padding(16),ColumnCount=1,RowCount=5};
-        main.RowStyles.Add(new RowStyle(SizeType.AutoSize)); main.RowStyles.Add(new RowStyle(SizeType.AutoSize)); main.RowStyles.Add(new RowStyle(SizeType.Percent,100)); main.RowStyles.Add(new RowStyle(SizeType.Absolute,105)); main.RowStyles.Add(new RowStyle(SizeType.AutoSize)); Controls.Add(main);
+        main.RowStyles.Add(new RowStyle(SizeType.AutoSize)); main.RowStyles.Add(new RowStyle(SizeType.AutoSize)); main.RowStyles.Add(new RowStyle(SizeType.Percent,100)); main.RowStyles.Add(new RowStyle(SizeType.Absolute,140)); main.RowStyles.Add(new RowStyle(SizeType.AutoSize)); Controls.Add(main);
         main.Controls.Add(new Label{Text="BTC数据采集器",AutoSize=true,Font=new Font("Microsoft YaHei UI",14,FontStyle.Bold),Margin=new Padding(0,0,0,8)},0,0);
         _status.Text="状态：启动中"; _status.AutoSize=true; _status.Margin=new Padding(0,0,0,10); main.Controls.Add(_status,0,1);
-        _grid.Dock=DockStyle.Fill; _grid.ReadOnly=true; _grid.AllowUserToAddRows=false; _grid.AllowUserToDeleteRows=false; _grid.RowHeadersVisible=false; _grid.AutoSizeColumnsMode=DataGridViewAutoSizeColumnsMode.Fill; _grid.AutoSizeRowsMode=DataGridViewAutoSizeRowsMode.AllCells; _grid.ScrollBars=ScrollBars.Vertical; _grid.DefaultCellStyle.WrapMode=DataGridViewTriState.False; _grid.ColumnHeadersDefaultCellStyle.WrapMode=DataGridViewTriState.False; _grid.SelectionMode=DataGridViewSelectionMode.FullRowSelect;
+        _grid.Dock=DockStyle.Fill; _grid.ReadOnly=true; _grid.AllowUserToAddRows=false; _grid.AllowUserToDeleteRows=false; _grid.RowHeadersVisible=false; _grid.AutoSizeColumnsMode=DataGridViewAutoSizeColumnsMode.Fill; _grid.AutoSizeRowsMode=DataGridViewAutoSizeRowsMode.AllCells; _grid.ScrollBars=ScrollBars.Vertical; _grid.DefaultCellStyle.WrapMode=DataGridViewTriState.False; _grid.ColumnHeadersDefaultCellStyle.WrapMode=DataGridViewTriState.False; _grid.SelectionMode=DataGridViewSelectionMode.FullRowSelect; _grid.AllowUserToResizeColumns=true;
         foreach(var c in new[]{("exchange","交易所"),("symbol","合约"),("price","价格"),("funding","资金"),("equity","权益"),("available","可用"),("position","持仓"),("entry","开仓"),("mark","标记"),("upnl","盈亏"),("liq","强平"),("orders","挂单"),("status","状态"),("last","成功"),("fail","失败")}) _grid.Columns.Add(c.Item1,c.Item2);
         SetColumnWeights();
+        LoadUiSettings();
+        _grid.ColumnWidthChanged += (_,_)=>SaveUiSettings();
+        ResizeEnd += (_,_)=>SaveUiSettings();
+        Move += (_,_)=> { if (!_loadingLayout && WindowState==FormWindowState.Normal) SaveUiSettings(); };
         main.Controls.Add(_grid,0,2);
         _log.Multiline=true; _log.ReadOnly=true; _log.ScrollBars=ScrollBars.Vertical; _log.Dock=DockStyle.Fill; _log.Font=new Font("Consolas",9); main.Controls.Add(_log,0,3);
         var buttons=new FlowLayoutPanel{Dock=DockStyle.Fill,Height=48,WrapContents=false,Margin=new Padding(0,12,0,0)}; main.Controls.Add(buttons,0,4);
@@ -631,21 +638,61 @@ public sealed class MainForm : Form
         _grid.SuspendLayout(); _grid.Rows.Clear();
         foreach(var s in snaps)
         {
-            var idx = _grid.Rows.Add(ShortEx(s.Exchange),s.Symbol,Fmt(s.Price,1),s.Funding,Money(s.Exchange,s.Equity,"equity"),Money(s.Exchange,s.Available,"available"),Pos(s.Exchange,s.Position),Fmt(s.Entry,1),Fmt(s.Mark,1),Money(s.Exchange,s.Upnl,"upnl"),Fmt(s.Liq,1),s.OpenOrders,s.Status,ShortTime(s.LastSuccess),s.ConsecutiveFailures);
+            var idx = _grid.Rows.Add(ShortEx(s.Exchange),ShortSymbol(s.Symbol),Fmt(s.Price,1),ShortFunding(s.Funding),Money(s.Exchange,s.Equity,"equity"),Money(s.Exchange,s.Available,"available"),Pos(s.Exchange,s.Position),Fmt(s.Entry,1),Fmt(s.Mark,1),Money(s.Exchange,s.Upnl,"upnl"),Fmt(s.Liq,1),s.OpenOrders,ShortStatus(s.Status),ShortTime(s.LastSuccess),s.ConsecutiveFailures);
             var row = _grid.Rows[idx];
             var ok = s.Status == "OK" && s.ConsecutiveFailures == 0;
             row.Cells[12].Style.BackColor = ok ? Color.FromArgb(210,245,210) : Color.FromArgb(255,210,210);
             row.Cells[12].Style.ForeColor = ok ? Color.DarkGreen : Color.DarkRed;
             row.DefaultCellStyle.BackColor = ok ? Color.White : Color.FromArgb(255,245,245);
+            for (int i=0;i<row.Cells.Count;i++) row.Cells[i].ToolTipText = row.Cells[i].Value?.ToString() ?? "";
         }
         _grid.ResumeLayout();
         var allOk = snaps.Count > 0 && snaps.All(x => x.Status == "OK" && x.ConsecutiveFailures == 0);
-        _status.Text=$"状态：{evt}｜{DateTime.Now:HH:mm:ss}｜WebSocket｜schema 2.3.0";
+        _status.Text=$"状态：{evt}｜{DateTime.Now:HH:mm:ss}｜WebSocket｜schema 2.4.0";
         UpdateTray(allOk, snaps);
+    }
+    void LoadUiSettings()
+    {
+        try
+        {
+            _loadingLayout = true;
+            if (!File.Exists(UiSettingsPath)) return;
+            using var doc = JsonDocument.Parse(File.ReadAllText(UiSettingsPath, Encoding.UTF8));
+            var root = doc.RootElement;
+            if (root.TryGetProperty("width", out var w) && root.TryGetProperty("height", out var h))
+            {
+                Width = Math.Max(MinimumSize.Width, w.GetInt32());
+                Height = Math.Max(MinimumSize.Height, h.GetInt32());
+            }
+            if (root.TryGetProperty("columns", out var cols))
+            {
+                foreach (var col in cols.EnumerateObject())
+                {
+                    if (_grid.Columns.Contains(col.Name))
+                    {
+                        var weight = Math.Max(20, col.Value.GetSingle());
+                        _grid.Columns[col.Name].FillWeight = weight;
+                    }
+                }
+            }
+        }
+        catch { }
+        finally { _loadingLayout = false; }
+    }
+    void SaveUiSettings()
+    {
+        if (_loadingLayout || _grid.Columns.Count == 0 || WindowState != FormWindowState.Normal) return;
+        try
+        {
+            var cols = _grid.Columns.Cast<DataGridViewColumn>().ToDictionary(c => c.Name, c => c.FillWeight);
+            var obj = new { width = Width, height = Height, columns = cols };
+            File.WriteAllText(UiSettingsPath, JsonSerializer.Serialize(obj, new JsonSerializerOptions{WriteIndented=true}), Encoding.UTF8);
+        }
+        catch { }
     }
     void SetColumnWeights()
     {
-        var weights = new Dictionary<string,float>{{"exchange",85},{"symbol",105},{"price",78},{"funding",70},{"equity",95},{"available",95},{"position",110},{"entry",78},{"mark",78},{"upnl",95},{"liq",78},{"orders",55},{"status",70},{"last",70},{"fail",45}};
+        var weights = new Dictionary<string,float>{{"exchange",70},{"symbol",82},{"price",78},{"funding",58},{"equity",78},{"available",78},{"position",88},{"entry",72},{"mark",72},{"upnl",78},{"liq",72},{"orders",46},{"status",62},{"last",66},{"fail",38}};
         foreach (DataGridViewColumn col in _grid.Columns)
         {
             col.AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill;
@@ -654,15 +701,18 @@ public sealed class MainForm : Form
         }
     }
     static string ShortEx(string ex) => ex.StartsWith("Binance") ? "Binance" : ex.StartsWith("OKX") ? "OKX" : ex;
+    static string ShortSymbol(string sym) => sym == "BTC-USD-SWAP" ? "BTC-USD" : sym;
+    static string ShortFunding(string v) => v.Replace("%","") + "%";
+    static string ShortStatus(string v) => v == "OK" ? "OK" : v.StartsWith("账户接口失败") ? "账户失败" : v.StartsWith("WebSocket失败") ? "WS失败" : v;
     static string ShortTime(string t) => DateTime.TryParse(t, out var dt) ? dt.ToString("HH:mm:ss") : "--";
-    static string Money(string ex,string v,string field) => ex.StartsWith("OKX") ? Add(v,"BTC",4) : Add(v,"USDT",1);
-    static string Add(string v,string unit,int d){ var f=Fmt(v,d); return f=="--"?"--":$"{f} {unit}"; }
+    static string Money(string ex,string v,string field) => ex.StartsWith("OKX") ? Add(v,"B",4) : Add(v,"U",1);
+    static string Add(string v,string unit,int d){ var f=Fmt(v,d); return f=="--"?"--":$"{f}{unit}"; }
     static string Fmt(string v,int d)=> decimal.TryParse(v,NumberStyles.Any,CultureInfo.InvariantCulture,out var n)?n.ToString("F"+d):"--";
     static string Pos(string ex,string v)
     {
         if(string.IsNullOrWhiteSpace(v)||v=="--") return "--";
-        if(ex.StartsWith("OKX")) { if(v.StartsWith("short ")) return "空 "+Fmt(v[6..],1)+" 张"; if(v.StartsWith("long ")) return "多 "+Fmt(v[5..],1)+" 张"; return Fmt(v,1)+" 张"; }
-        if(decimal.TryParse(v,NumberStyles.Any,CultureInfo.InvariantCulture,out var n)) return n>0?$"多 {n:F4} BTC":n<0?$"空 {Math.Abs(n):F4} BTC":"无 0 BTC"; return v;
+        if(ex.StartsWith("OKX")) { if(v.StartsWith("short ")) return "空"+Fmt(v[6..],1)+"张"; if(v.StartsWith("long ")) return "多"+Fmt(v[5..],1)+"张"; return Fmt(v,1)+"张"; }
+        if(decimal.TryParse(v,NumberStyles.Any,CultureInfo.InvariantCulture,out var n)) return n>0?$"多{n:F4}B":n<0?$"空{Math.Abs(n):F4}B":"无0B"; return v;
     }
     void UpdateTray(bool ok, IReadOnlyList<Snapshot> snaps)
     {
@@ -700,7 +750,8 @@ public sealed class MainForm : Form
         using var dlg = new ConfigForm(_collector);
         if (dlg.ShowDialog(this) == DialogResult.OK)
         {
-            AppendLog("配置已保存，部分连接参数重启程序后完全生效");
+            _collector.InitDb();
+            AppendLog("配置已保存，输出目录/数据库已初始化；连接参数重启程序后完全生效");
             _ = _collector.RefreshNow();
         }
     }
