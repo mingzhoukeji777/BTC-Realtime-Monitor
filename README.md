@@ -21,6 +21,8 @@ Windows 原生系统托盘 BTC 多交易所实时监控工具。
   - 当前持仓（需要 API Key/Secret/Passphrase）
   - 当前挂单（需要 API Key/Secret/Passphrase）
 - 本地 CSV 记录快照
+- 性能优化：默认 10 秒刷新，网络请求超时缩短，减少拖动窗口卡顿
+- 单位显示：账户权益/可用/未实现盈亏显示 USDT 或 BTC，持仓显示多/空和单位
 - 已打包为 EXE，可直接双击运行，不需要 BAT
 
 ## 运行方式

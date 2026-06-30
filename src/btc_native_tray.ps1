@@ -68,7 +68,7 @@ function HmacSHA256Base64([string]$secret, [string]$message) {
 
 function UrlEncode([string]$s) { return [System.Uri]::EscapeDataString($s) }
 
-function Invoke-JsonGet([string]$url, [hashtable]$headers=$null, [int]$timeout=8) {
+function Invoke-JsonGet([string]$url, [hashtable]$headers=$null, [int]$timeout=4) {
     try {
         if ($headers) { return Invoke-RestMethod -Uri $url -TimeoutSec $timeout -Headers $headers -Method Get }
         return Invoke-RestMethod -Uri $url -TimeoutSec $timeout -Method Get -Headers @{ 'User-Agent' = 'BTC-Realtime-Monitor/1.1' }
@@ -124,7 +124,7 @@ function OKX-PrivateGet([string]$requestPath, [hashtable]$cfg) {
         'Content-Type' = 'application/json'
         'User-Agent' = 'BTC-Realtime-Monitor/1.1'
     }
-    return Invoke-JsonGet ('https://www.okx.com' + $requestPath) $headers 10
+    return Invoke-JsonGet ('https://www.okx.com' + $requestPath) $headers 4
 }
 
 function Format-Num($v, [int]$digits=2) {
@@ -220,14 +220,14 @@ try {
     Add-Type -AssemblyName System.Drawing
     [System.Windows.Forms.Application]::EnableVisualStyles()
     Ensure-SnapshotFile
-    Write-AppLog '程序启动：v1.1 Binance U本位 + OKX 币本位'
+    Write-AppLog '程序启动：v1.1.3 性能优化 + 单位显示'
 
     $cfg = Load-Config
-    $priceSec = [int](Get-Cfg $cfg 'PRICE_REFRESH_SECONDS' '3')
-    if ($priceSec -lt 3) { $priceSec = 3 }
+    $priceSec = [int](Get-Cfg $cfg 'PRICE_REFRESH_SECONDS' '10')
+    if ($priceSec -lt 5) { $priceSec = 5 }
 
     $form = New-Object System.Windows.Forms.Form
-    $form.Text = 'BTC实时通信系统 v1.1'
+    $form.Text = 'BTC实时通信系统 v1.1.3 优化版'
     $form.StartPosition = 'CenterScreen'
     $form.MinimumSize = New-Object System.Drawing.Size(980, 650)
     $form.Size = New-Object System.Drawing.Size(1080, 720)
@@ -327,29 +327,85 @@ try {
     $notify.ContextMenuStrip = $menu
 
     $script:closingForExit = $false
+    function Add-Unit([string]$value, [string]$unit, [int]$digits=4) {
+        $n = Format-Num $value $digits
+        if ($n -eq '--') { return '--' }
+        return ($n + ' ' + $unit)
+    }
+    function Format-PositionText([string]$exchange, [string]$value) {
+        if ([string]::IsNullOrWhiteSpace($value) -or $value -eq '--') { return '--' }
+        if ($exchange -like 'OKX*') {
+            if ($value -like 'short *') { return ('空 ' + $value.Substring(6) + ' 张') }
+            if ($value -like 'long *') { return ('多 ' + $value.Substring(5) + ' 张') }
+            try {
+                $n = [double]$value
+                if ($n -gt 0) { return ('多 ' + $value + ' 张') }
+                if ($n -lt 0) { return ('空 ' + ([math]::Abs($n)).ToString() + ' 张') }
+                return '无 0 张'
+            } catch { return ($value + ' 张') }
+        } else {
+            try {
+                $n = [double]$value
+                if ($n -gt 0) { return ('多 ' + (Format-Num $n 6) + ' BTC') }
+                if ($n -lt 0) { return ('空 ' + (Format-Num ([math]::Abs($n)) 6) + ' BTC') }
+                return '无 0 BTC'
+            } catch { return $value }
+        }
+    }
     function Update-Grid([array]$snaps) {
-        $grid.Rows.Clear()
-        foreach ($s in $snaps) {
-            $grid.Rows.Add($s.exchange,$s.symbol,(Format-Num $s.price 2),$s.funding,(Format-Num $s.equity 4),(Format-Num $s.available 4),$s.position,(Format-Num $s.entry 2),(Format-Num $s.mark 2),(Format-Num $s.upnl 4),(Format-Num $s.liq 2),$s.open_orders,$s.status) | Out-Null
+        $grid.SuspendLayout()
+        try {
+            $grid.Rows.Clear()
+            foreach ($s in $snaps) {
+                if ($s.exchange -like 'OKX*') {
+                    $equityText = Add-Unit $s.equity 'BTC' 8
+                    $availText = Add-Unit $s.available 'BTC' 8
+                    $posText = Format-PositionText $s.exchange $s.position
+                    $upnlText = Add-Unit $s.upnl 'BTC' 8
+                } else {
+                    $equityText = Add-Unit $s.equity 'USDT' 4
+                    $availText = Add-Unit $s.available 'USDT' 4
+                    $posText = Format-PositionText $s.exchange $s.position
+                    $upnlText = Add-Unit $s.upnl 'USDT' 4
+                }
+                $grid.Rows.Add($s.exchange,$s.symbol,(Format-Num $s.price 2),$s.funding,$equityText,$availText,$posText,(Format-Num $s.entry 2),(Format-Num $s.mark 2),$upnlText,(Format-Num $s.liq 2),$s.open_orders,$s.status) | Out-Null
+            }
+        } finally {
+            $grid.ResumeLayout()
         }
     }
     function Refresh-All {
-        $now = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
-        $cfg = Load-Config
-        $snaps = @()
-        if ((Get-Cfg $cfg 'BINANCE_ENABLED' 'true') -ne 'false') { $snaps += (Get-BinanceSnapshot $cfg) }
-        if ((Get-Cfg $cfg 'OKX_ENABLED' 'true') -ne 'false') { $snaps += (Get-OKXSnapshot $cfg) }
-        Update-Grid $snaps
-        foreach ($s in $snaps) {
-            $csvLine = '"{0}","{1}","{2}","{3}","{4}","{5}","{6}","{7}","{8}","{9}","{10}","{11}","{12}","{13}"' -f $now,$s.exchange,$s.symbol,$s.price,$s.funding,$s.equity,$s.available,$s.position,$s.entry,$s.mark,$s.upnl,$s.liq,$s.open_orders,($s.status -replace '"','')
-            Add-Content -Path $SnapshotCsv -Encoding UTF8 -Value $csvLine
+        if ($script:refreshing) { return }
+        $script:refreshing = $true
+        $statusLabel.Text = '状态：刷新中……'
+        [System.Windows.Forms.Application]::DoEvents()
+        try {
+            $now = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+            $cfg = Load-Config
+            $snaps = @()
+            if ((Get-Cfg $cfg 'BINANCE_ENABLED' 'true') -ne 'false') { $snaps += (Get-BinanceSnapshot $cfg) }
+            if ((Get-Cfg $cfg 'OKX_ENABLED' 'true') -ne 'false') { $snaps += (Get-OKXSnapshot $cfg) }
+            Update-Grid $snaps
+            foreach ($s in $snaps) {
+                $csvLine = '"{0}","{1}","{2}","{3}","{4}","{5}","{6}","{7}","{8}","{9}","{10}","{11}","{12}","{13}"' -f $now,$s.exchange,$s.symbol,$s.price,$s.funding,$s.equity,$s.available,$s.position,$s.entry,$s.mark,$s.upnl,$s.liq,$s.open_orders,($s.status -replace '"','')
+                Add-Content -Path $SnapshotCsv -Encoding UTF8 -Value $csvLine
+            }
+            $statusLabel.Text = "状态：已刷新｜$now｜优化版：默认10秒刷新，网络超时缩短"
+            $notify.Text = ('BTC监控 ' + $now)
+            $summary = ($snaps | ForEach-Object { $_.exchange + '=' + (Format-Num $_.price 2) + ' funding=' + $_.funding }) -join ' | '
+            $logBox.AppendText("`r`n[$now] $summary")
+            Write-AppLog ("refresh $summary")
+        } catch {
+            $msg = $_.Exception.Message
+            $statusLabel.Text = '状态：刷新失败｜' + $msg
+            $logBox.AppendText("`r`n[ERROR] " + $msg)
+            Write-AppLog ('refresh error ' + $msg)
+        } finally {
+            $script:refreshing = $false
         }
-        $statusLabel.Text = "状态：已刷新｜$now｜公开价格/资金费率已接入；私有账户接口取决于 config.env 密钥"
-        $notify.Text = ('BTC监控 ' + $now)
-        $summary = ($snaps | ForEach-Object { $_.exchange + '=' + (Format-Num $_.price 2) + ' funding=' + $_.funding }) -join ' | '
-        $logBox.AppendText("`r`n[$now] $summary")
-        Write-AppLog ("refresh $summary")
     }
+    $script:refreshing = $false
+
 
     $showAction = { $form.Show(); $form.WindowState = [System.Windows.Forms.FormWindowState]::Normal; $form.Activate(); Write-AppLog '显示窗口' }
     $hideAction = { $form.Hide(); $notify.BalloonTipTitle='BTC实时通信系统'; $notify.BalloonTipText='程序已隐藏到系统托盘'; $notify.ShowBalloonTip(1000); Write-AppLog '隐藏到托盘' }
@@ -367,9 +423,9 @@ try {
     $timer.Interval = $priceSec * 1000
     $timer.add_Tick({ Refresh-All })
     $timer.Start()
-    $notify.ShowBalloonTip(1200, 'BTC实时通信系统', 'v1.1 多交易所监控已启动', [System.Windows.Forms.ToolTipIcon]::Info)
+    $notify.ShowBalloonTip(1200, 'BTC实时通信系统', 'v1.1.3 优化版已启动', [System.Windows.Forms.ToolTipIcon]::Info)
     Refresh-All
-    Write-AppLog 'NotifyIcon Visible=True，进入消息循环 v1.1'
+    Write-AppLog 'NotifyIcon Visible=True，进入消息循环 v1.1.3'
     [System.Windows.Forms.Application]::Run($form)
 }
 catch { Write-AppLog ('程序崩溃：' + $_.Exception.ToString()) }
