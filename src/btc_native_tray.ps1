@@ -69,8 +69,25 @@ function HmacSHA256Base64([string]$secret, [string]$message) {
 function UrlEncode([string]$s) { return [System.Uri]::EscapeDataString($s) }
 
 function Invoke-JsonGet([string]$url, [hashtable]$headers=$null, [int]$timeout=8) {
-    if ($headers) { return Invoke-RestMethod -Uri $url -TimeoutSec $timeout -Headers $headers -Method Get }
-    return Invoke-RestMethod -Uri $url -TimeoutSec $timeout -Method Get -Headers @{ 'User-Agent' = 'BTC-Realtime-Monitor/1.1' }
+    try {
+        if ($headers) { return Invoke-RestMethod -Uri $url -TimeoutSec $timeout -Headers $headers -Method Get }
+        return Invoke-RestMethod -Uri $url -TimeoutSec $timeout -Method Get -Headers @{ 'User-Agent' = 'BTC-Realtime-Monitor/1.1' }
+    } catch {
+        $detail = $_.Exception.Message
+        try { if ($_.ErrorDetails -and $_.ErrorDetails.Message) { $detail = $_.ErrorDetails.Message } } catch {}
+        try {
+            $resp = $_.Exception.Response
+            if ($resp) {
+                $stream = $resp.GetResponseStream()
+                if ($stream) {
+                    $reader = New-Object System.IO.StreamReader($stream)
+                    $body = $reader.ReadToEnd()
+                    if ($body) { $detail = $body }
+                }
+            }
+        } catch {}
+        throw $detail
+    }
 }
 
 function Binance-SignedGet([string]$path, [hashtable]$params, [hashtable]$cfg) {
